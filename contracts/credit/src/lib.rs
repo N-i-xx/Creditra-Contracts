@@ -300,13 +300,14 @@ impl Credit {
 
         let effective_repay = amount.min(credit_line.utilized_amount);
         if effective_repay > 0 {
-            let token_address: Address = env
+            if let Some(token_address) = env
                 .storage()
                 .instance()
-                .get(&token_key(&env))
-                .expect("token not configured");
-            let token_client = token::Client::new(&env, &token_address);
-            token_client.transfer(&borrower, &env.current_contract_address(), &effective_repay);
+                .get::<_, Address>(&DataKey::LiquidityToken)
+            {
+                let token_client = token::Client::new(&env, &token_address);
+                token_client.transfer(&borrower, &env.current_contract_address(), &effective_repay);
+            }
         }
 
         let new_utilized = credit_line.utilized_amount.saturating_sub(amount).max(0);
@@ -535,6 +536,35 @@ mod test {
         client
             .get_credit_line(borrower)
             .expect("Credit line not found")
+    }
+
+    /// Sets up a Stellar asset contract, mints `initial_balance` to `contract_id`, returns (token_address, ()).
+    fn setup_token(env: &Env, contract_id: &Address, initial_balance: i128) -> (Address, ()) {
+        env.mock_all_auths();
+        let token_admin = Address::generate(env);
+        let token = env.register_stellar_asset_contract_v2(token_admin);
+        let token_admin_client = StellarAssetClient::new(env, &token.address());
+        token_admin_client.mint(contract_id, &initial_balance);
+        (token.address(), ())
+    }
+
+    /// Full setup: contract inited with admin, liquidity token set, credit line opened for borrower.
+    /// Returns (client, token_address, admin).
+    fn setup_contract_with_credit_line<'a>(
+        env: &'a Env,
+        borrower: &Address,
+        credit_limit: i128,
+        initial_mint: i128,
+    ) -> (CreditClient<'a>, Address, Address) {
+        env.mock_all_auths();
+        let admin = Address::generate(env);
+        let contract_id = env.register(Credit, ());
+        let (token_address, _sac) = setup_token(env, &contract_id, initial_mint);
+        let client = CreditClient::new(env, &contract_id);
+        client.init(&admin);
+        client.set_liquidity_token(&token_address);
+        client.open_credit_line(borrower, &credit_limit, &300_u32, &70_u32);
+        (client, token_address, admin)
     }
 
     #[test]
@@ -1571,7 +1601,8 @@ mod test {
         let contract_id = env.register(Credit, ());
         let (token_address, _sac) = setup_token(&env, &contract_id, 1_000);
         let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin, &token_address);
+        client.init(&admin);
+        client.set_liquidity_token(&token_address);
         client.open_credit_line(&borrower, &1_000, &300_u32, &70_u32);
         client.draw_credit(&borrower, &400);
         let token_client = token::Client::new(&env, &token_address);
@@ -1591,7 +1622,8 @@ mod test {
         let contract_id = env.register(Credit, ());
         let (token_address, _sac) = setup_token(&env, &contract_id, 1_000);
         let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin, &token_address);
+        client.init(&admin);
+        client.set_liquidity_token(&token_address);
         client.open_credit_line(&borrower, &1_000, &300_u32, &70_u32);
         client.draw_credit(&borrower, &100);
         let token_client = token::Client::new(&env, &token_address);
@@ -1643,7 +1675,8 @@ mod test {
         let contract_id = env.register(Credit, ());
         let (token_address, _sac) = setup_token(&env, &contract_id, 1_000);
         let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin, &token_address);
+        client.init(&admin);
+        client.set_liquidity_token(&token_address);
         client.open_credit_line(&borrower, &1_000, &300_u32, &70_u32);
         client.draw_credit(&borrower, &300);
         client.suspend_credit_line(&borrower);
