@@ -193,6 +193,51 @@ Reinstates a defaulted credit line to Active. Admin only. Allowed only when stat
 
 Panics if the credit line does not exist or status is not Defaulted.  
 Emits: `("credit", "reinstate")` event.
+### `set_liquidity_source(env, reserve_address)`
+Sets the address that provides liquidity for draw operations. Admin-only.
+
+#### Validation
+Rejects configurations that would silently corrupt draw behaviour:
+- `reserve_address` must not equal the contract's own address — explicitly setting the contract as its own reserve is a self-referential misconfiguration.
+- `reserve_address` must not equal the admin address — admin funds must not serve as the protocol reserve (trust-boundary violation).
+
+#### Errors
+| Condition | Error |
+|---|---|
+| `reserve_address == contract address` | `ContractError::InvalidConfiguration` |
+| `reserve_address == admin address` | `ContractError::InvalidConfiguration` |
+| Caller is not admin | Auth error |
+
+#### Security Notes
+- Only the admin can call this function (`require_auth` enforced).
+- The contract address is the default reserve set during `init`. Explicitly passing it back is always a misconfiguration.
+- The admin address must never be the reserve — this would allow the admin to drain their own wallet via protocol draws.
+
+---
+### `set_liquidity_source(env, reserve_address)`
+Sets the address that provides liquidity for draw operations. Admin-only.
+
+#### Validation — invalid configurations are rejected
+The following configurations are explicitly rejected to prevent silent protocol misconfiguration:
+
+| Condition | Error |
+|---|---|
+| `reserve_address == contract address` | `ContractError::InvalidConfiguration` (code 13) |
+| `reserve_address == admin address` | `ContractError::InvalidConfiguration` (code 13) |
+
+Setting the contract's own address is rejected because `init` already defaults the liquidity source to the contract address — explicitly setting it again signals a misconfiguration and would create a self-referential liquidity loop. Setting the admin address is rejected because admin funds must never serve as the protocol reserve (trust-boundary violation).
+
+#### Security notes
+- Only the admin can call this function (`require_auth` enforced).
+- A valid reserve must be a distinct, non-admin, non-contract address (e.g. a dedicated treasury or vault contract).
+- If `set_liquidity_source` is never called after `init`, the contract itself acts as the reserve (default behaviour).
+
+| Parameter | Type | Description |
+|---|---|---|
+| `reserve_address` | `Address` | Address of the liquidity reserve (must not be the contract or admin address) |
+
+---
+
 ### `set_rate_change_limits(env, max_rate_change_bps, rate_change_min_interval)`
 Sets the global rate-change limits. Admin-only.
 
@@ -231,6 +276,9 @@ The `Credit` contract uses standard `u32` discriminants for standardized error h
 | `10` | `UtilizationNotZero` | Action cannot be performed because the credit line utilization is not zero. |
 | `11` | `Reentrancy` | Reentrancy detected during cross-contract calls. |
 | `12` | `Overflow` | Math overflow occurred during calculation. |
+| `13` | `InvalidConfiguration` | The liquidity source configuration is invalid (e.g. source equals contract or admin address). |
+| `13` | `InvalidConfiguration` | The liquidity source configuration is invalid (e.g. source equals the contract address or the admin address). |
+| `13` | `InvalidConfiguration` | The liquidity source configuration is invalid (e.g. source equals the contract address or the admin address). |
 
 ---
 
@@ -261,6 +309,10 @@ The `Credit` contract uses standard `u32` discriminants for standardized error h
 | `default_credit_line` | Admin |
 | `reinstate_credit_line` | Admin |
 | `set_rate_change_limits` | Admin |
+| `set_liquidity_source` | Admin |
+| `set_liquidity_token` | Admin |
+| `set_liquidity_token` | Admin |
+| `set_liquidity_source` | Admin |
 | `get_rate_change_limits` | Anyone (view) |
 | `get_credit_line` | Anyone (view) |
 

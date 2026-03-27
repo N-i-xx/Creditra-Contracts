@@ -25,7 +25,8 @@ mod events;
 mod types;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Symbol,
+    contract, contractimpl, contracttype, panic_with_error, symbol_short, token, Address, Env,
+    Symbol,
 };
 
 use events::{
@@ -33,7 +34,7 @@ use events::{
     publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, RepaymentEvent,
     RiskParametersUpdatedEvent,
 };
-use types::{CreditLineData, CreditStatus};
+use types::{ContractError, CreditLineData, CreditStatus, RateChangeConfig};
 
 /// Maximum interest rate in basis points (100%).
 const MAX_INTEREST_RATE_BPS: u32 = 10_000;
@@ -102,6 +103,11 @@ fn clear_reentrancy_guard(env: &Env) {
     env.storage().instance().set(&reentrancy_key(env), &false);
 }
 
+/// Instance storage key for rate-change config.
+fn rate_cfg_key(env: &Env) -> Symbol {
+    Symbol::new(env, "rate_cfg")
+}
+
 #[contract]
 pub struct Credit;
 
@@ -127,10 +133,35 @@ impl Credit {
         ()
     }
 
-    /// @notice Sets the address that provides liquidity for draw operations.
-    /// @dev Admin-only. If unset, init config uses the contract address.
+    /// Sets the address that provides liquidity for draw operations.
+    ///
+    /// # Validation
+    /// Rejects configurations that would silently corrupt draw behaviour:
+    /// - `reserve_address` must not equal the contract's own address (self-referential loop).
+    ///   The contract address is the default fallback; explicitly setting it is a no-op that
+    ///   signals a misconfiguration.
+    /// - `reserve_address` must not equal the admin address (admin funds must not be used as
+    ///   the protocol reserve — trust-boundary violation).
+    ///
+    /// # Errors
+    /// Panics with [`ContractError::InvalidConfiguration`] if any of the above checks fail.
+    ///
+    /// # Access control
+    /// Admin-only. Caller must satisfy `require_auth` for the stored admin address.
     pub fn set_liquidity_source(env: Env, reserve_address: Address) -> () {
-        require_admin_auth(&env);
+        let admin = require_admin_auth(&env);
+
+        // Guard: reserve must not be the contract itself (default fallback — explicit set is a
+        // misconfiguration and would create a self-referential liquidity loop).
+        if reserve_address == env.current_contract_address() {
+            panic_with_error!(&env, ContractError::InvalidConfiguration);
+        }
+
+        // Guard: reserve must not be the admin address (admin wallet ≠ protocol reserve).
+        if reserve_address == admin {
+            panic_with_error!(&env, ContractError::InvalidConfiguration);
+        }
+
         env.storage()
             .instance()
             .set(&DataKey::LiquiditySource, &reserve_address);
@@ -202,60 +233,19 @@ impl Credit {
                 risk_score,
             },
         );
-
-
-
-    /// Draw from credit line (borrower).
- 
-    /// Errors with ContractError if credit line does not exist, is Closed, or borrower has not authorized.
-
-    /// Reverts if credit line does not exist, is Closed, borrower has not authorized,
-    /// or the provided borrower does not match the stored credit line owner.
- 
- 
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
-
-
-    /// Draw from credit line: verifies limit, updates utilized_amount,
-    /// and transfers the protocol token from the contract reserve to the borrower.
-    ///
-    /// # Panics
-    /// - `"Credit line not found"` – borrower has no open credit line
-    /// - `"credit line is closed"` – line is closed
-    /// - `"Credit line not active"` – line is suspended or defaulted
-    /// - `"exceeds credit limit"` – draw would push utilized_amount past credit_limit
-    /// - `"amount must be positive"` – amount is zero or negative
-    /// - `"reentrancy guard"` – re-entrant call detected
-
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
- 
-
-    /// Draw from credit line (borrower).
-    /// Reverts if credit line does not exist, is Closed/Suspended, or borrower has not authorized.
-    /// Reverts if credit line does not exist, is Closed, or borrower has not authorized.
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
-        set_reentrancy_guard(&env);
-        borrower.require_auth();
-
     }
 
-
-
-    /// Update risk parameters for an existing credit line.
+    /// Draw credit by transferring liquidity tokens to the borrower.
     ///
-    /// Called by admin or risk engine when a borrower's risk profile changes.
+    /// Enforces status/limit/liquidity checks and uses a reentrancy guard.
     ///
-    /// # Parameters
-    /// - `borrower`: The borrower's address.
-    /// - `credit_limit`: New credit limit.
-    /// - `interest_rate_bps`: New interest rate in basis points.
-    /// - `risk_score`: New risk score.
-    ///
-    /// # Note
-    /// Not yet implemented. Planned logic: load existing record, update fields,
-    /// persist updated [`CreditLineData`].
-    /// @notice Draws credit by transferring liquidity tokens to the borrower.
-    /// @dev Enforces status/limit/liquidity checks and uses a reentrancy guard.
+    /// # Panics
+    /// - `"amount must be positive"` – amount is zero or negative
+    /// - `"Credit line not found"` – borrower has no open credit line
+    /// - `"credit line is closed"` – line is Closed
+    /// - `"exceeds credit limit"` – draw would push utilized_amount past credit_limit
+    /// - `"Insufficient liquidity reserve for requested draw amount"` – reserve balance too low
+    /// - `"reentrancy guard"` – re-entrant call detected
     pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
         set_reentrancy_guard(&env);
         borrower.require_auth();
@@ -534,6 +524,7 @@ impl Credit {
                 risk_score: credit_line.risk_score,
             },
         );
+    }
 
     /// Mark a credit line as defaulted (admin only).
     ///
@@ -564,6 +555,7 @@ impl Credit {
                 risk_score: credit_line.risk_score,
             },
         );
+    }
 
     /// Reinstate a defaulted credit line to Active (admin only).
     ///
@@ -610,19 +602,12 @@ impl Credit {
 
 #[cfg(test)]
 mod test {
-    soroban_sdk::contractimpl! { export! CreditImpl }
-
-    use soroban_sdk::contractclient::ContractClient;
     use super::*;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::testutils::Events as _;
     use soroban_sdk::token;
-    use soroban_sdk::contractclient::ContractClient;
-use soroban_sdk::testutils::Events;
     use soroban_sdk::token::StellarAssetClient;
     use soroban_sdk::{Symbol, TryFromVal, TryIntoVal};
-
-    type CreditClient<'a> = soroban_sdk::contractclient::ContractClient<'a, CreditImpl>;
 
     fn setup_test(env: &Env) -> (Address, Address, Address) {
         env.mock_all_auths();
@@ -2026,6 +2011,9 @@ use soroban_sdk::testutils::Events;
 
     #[test]
     fn test_draw_credit_uses_configured_external_liquidity_source() {
+        // Verify that draw_credit correctly uses the configured liquidity source.
+        // The default source is the contract itself; here we confirm a draw works
+        // when the contract holds the reserve (default behaviour after init).
         let env = Env::default();
         env.mock_all_auths();
 
@@ -2037,17 +2025,15 @@ use soroban_sdk::testutils::Events;
 
         client.init(&admin);
         client.open_credit_line(&borrower, &1_000_i128, &300_u32, &70_u32);
-        let reserve = contract_id.clone();
 
+        // Default liquidity source is the contract itself (set during init).
+        // Mint reserve into the contract and draw — no explicit set_liquidity_source needed.
         client.set_liquidity_token(&liquidity.address());
-        client.set_liquidity_source(&reserve);
-
-        liquidity.mint(&reserve, 500_i128);
+        liquidity.mint(&contract_id, 500_i128);
         client.draw_credit(&borrower, &120_i128);
 
-        assert_eq!(liquidity.balance(&reserve), 380_i128);
-        assert_eq!(liquidity.balance(&borrower), 120_i128);
         assert_eq!(liquidity.balance(&contract_id), 380_i128);
+        assert_eq!(liquidity.balance(&borrower), 120_i128);
     }
 
     #[test]
@@ -2132,5 +2118,75 @@ use soroban_sdk::testutils::Events;
         // Current repay implementation is state-only; token balances/allowances are unchanged.
         assert_eq!(liquidity.balance(&borrower), 550_i128);
         assert_eq!(liquidity.allowance(&borrower, &contract_id), 200_i128);
+    }
+
+    // ========== set_liquidity_source: misconfiguration validation (#47) ==========
+
+    /// set_liquidity_source must reject the contract's own address as the reserve.
+    #[test]
+    #[should_panic]
+    fn test_set_liquidity_source_rejects_contract_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.set_liquidity_source(&contract_id);
+    }
+
+    /// set_liquidity_source must reject the admin address as the reserve.
+    #[test]
+    #[should_panic]
+    fn test_set_liquidity_source_rejects_admin_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.set_liquidity_source(&admin);
+    }
+
+    /// set_liquidity_source must accept a valid, distinct reserve address and persist it.
+    #[test]
+    fn test_set_liquidity_source_accepts_valid_reserve() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let reserve = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.set_liquidity_source(&reserve);
+
+        let stored: Address = env
+            .as_contract(&contract_id, || {
+                env.storage().instance().get(&DataKey::LiquiditySource)
+            })
+            .unwrap();
+        assert_eq!(stored, reserve);
+    }
+
+    /// set_liquidity_source must reject a non-admin caller even with a valid reserve address.
+    #[test]
+    #[should_panic]
+    fn test_set_liquidity_source_rejects_non_admin_caller() {
+        let env = Env::default();
+        // Do NOT mock_all_auths — caller is not the admin.
+        let admin = Address::generate(&env);
+        let reserve = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        env.mock_auths(&[]);
+        client.init(&admin);
+        client.set_liquidity_source(&reserve);
     }
 }

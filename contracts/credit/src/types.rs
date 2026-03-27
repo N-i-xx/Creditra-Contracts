@@ -39,6 +39,9 @@ pub enum ContractError {
     Reentrancy = 11,
     /// Math overflow occurred during calculation.
     Overflow = 12,
+    /// The liquidity source configuration is invalid (e.g. source equals borrower address,
+    /// zero address, or a restricted system account).
+    InvalidConfiguration = 13,
 }
 
 /// Stored credit line for a borrower.
