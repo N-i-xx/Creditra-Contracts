@@ -2,6 +2,8 @@
 
 The `Credit` contract implements on-chain credit lines for the Creditra protocol on Stellar Soroban. It manages the full lifecycle of a borrower's credit line — from opening to closing or defaulting — and emits events at each stage.
 
+Related security reference: [`docs/threat-model.md`](threat-model.md).
+
 ---
 
 ## Data Model
