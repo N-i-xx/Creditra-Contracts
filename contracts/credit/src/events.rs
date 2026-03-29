@@ -9,22 +9,31 @@ use crate::types::CreditStatus;
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreditLineEvent {
+    /// Type of lifecycle event (e.g., "opened", "suspend", "closed", "default").
     pub event_type: Symbol,
+    /// Address of the borrower.
     pub borrower: Address,
+    /// New status of the credit line.
     pub status: CreditStatus,
+    /// Credit limit of the line.
     pub credit_limit: i128,
+    /// Interest rate in basis points.
     pub interest_rate_bps: u32,
+    /// Risk score of the borrower.
     pub risk_score: u32,
 }
 
 /// Event emitted when a borrower repays credit.
-/// Used for indexing and analytics (borrower, amount, new utilized amount, timestamp).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepaymentEvent {
+    /// Address of the borrower.
     pub borrower: Address,
+    /// Amount repaid.
     pub amount: i128,
+    /// New outstanding principal.
     pub new_utilized_amount: i128,
+    /// Ledger timestamp of the repayment.
     pub timestamp: u64,
 }
 
@@ -32,9 +41,13 @@ pub struct RepaymentEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RiskParametersUpdatedEvent {
+    /// Address of the borrower.
     pub borrower: Address,
+    /// New credit limit.
     pub credit_limit: i128,
+    /// New interest rate in basis points.
     pub interest_rate_bps: u32,
+    /// New risk score.
     pub risk_score: u32,
 }
 
@@ -42,9 +55,13 @@ pub struct RiskParametersUpdatedEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DrawnEvent {
+    /// Address of the borrower.
     pub borrower: Address,
+    /// Amount drawn.
     pub amount: i128,
+    /// New outstanding principal.
     pub new_utilized_amount: i128,
+    /// Ledger timestamp of the draw operation.
     pub timestamp: u64,
 }
 

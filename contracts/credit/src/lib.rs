@@ -1,5 +1,4 @@
 #![no_std]
-#![allow(clippy::unused_unit)]
 
 //! Creditra credit contract: credit lines, draw/repay, risk parameters.
 //!
@@ -59,7 +58,8 @@ mod events;
 mod types;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Symbol,
+    contract, contractimpl, contracttype, panic_with_error, symbol_short, token, Address, Env,
+    Symbol,
 };
 
 use events::{
@@ -136,7 +136,6 @@ impl Credit {
         env.storage()
             .instance()
             .set(&DataKey::LiquiditySource, &env.current_contract_address());
-        ()
     }
 
     /// @notice Sets the token contract used for reserve/liquidity checks and draw transfers.
@@ -247,7 +246,7 @@ impl Credit {
             panic!("Borrower mismatch for credit line");
         }
 
-        if credit_line.status == CreditStatus::Closed {
+        if credit_line.status != CreditStatus::Active {
             clear_reentrancy_guard(&env);
             env.panic_with_error(ContractError::CreditLineClosed);
         }
@@ -271,7 +270,6 @@ impl Credit {
             clear_reentrancy_guard(&env);
             panic!("credit line is restricted - repay excess amount first");
         }
-
         let updated_utilized = credit_line
             .utilized_amount
             .checked_add(amount)
@@ -309,7 +307,6 @@ impl Credit {
             },
         );
         clear_reentrancy_guard(&env);
-        ()
     }
 
     /// Repay credit (borrower).
@@ -2076,5 +2073,168 @@ mod test_rate_change_limits {
         client.init(&admin);
 
         client.set_rate_change_limits(&100_u32, &0_u64);
+    }
+    #[test]
+    #[should_panic]
+    fn test_update_risk_parameters_not_found() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        env.mock_all_auths();
+        client.update_risk_parameters(&borrower, &1000, &500, &50);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update_risk_parameters_over_utilized_limit() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        env.mock_all_auths();
+        client.open_credit_line(&borrower, &1000, &500, &50);
+
+        // Mock a draw so utilized > 0
+        env.as_contract(&contract_id, || {
+            let mut line: CreditLineData = env.storage().persistent().get(&borrower).unwrap();
+            line.utilized_amount = 500;
+            env.storage().persistent().set(&borrower, &line);
+        });
+
+        // Try to set limit to 400 (which is < 500)
+        client.update_risk_parameters(&borrower, &400, &500, &50);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_suspend_already_suspended_panics() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000, &500, &50);
+        client.suspend_credit_line(&borrower);
+
+        // This should panic
+        client.suspend_credit_line(&borrower);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_default_closed_line_panics() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000, &500, &50);
+        client.close_credit_line(&borrower, &admin);
+
+        // This should panic
+        client.default_credit_line(&borrower);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_reinstate_active_line_panics() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000, &500, &50);
+
+        // This should panic
+        client.reinstate_credit_line(&borrower);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_draw_on_closed_line_panics() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        env.mock_all_auths();
+        client.open_credit_line(&borrower, &1000, &500, &50);
+        client.close_credit_line(&borrower, &admin);
+
+        client.draw_credit(&borrower, &100);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_draw_on_suspended_line_panics() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        env.mock_all_auths();
+        client.open_credit_line(&borrower, &1000, &500, &50);
+        client.suspend_credit_line(&borrower);
+
+        client.draw_credit(&borrower, &100);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_draw_zero_amount_panics() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        env.mock_all_auths();
+        client.open_credit_line(&borrower, &1000, &500, &50);
+
+        client.draw_credit(&borrower, &0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_repay_zero_amount_panics() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        env.mock_all_auths();
+        client.open_credit_line(&borrower, &1000, &500, &50);
+
+        client.repay_credit(&borrower, &0);
+    }
+
+    #[test]
+    fn test_get_rate_change_limits_not_set_returns_none() {
+        let env = Env::default();
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        let limits = client.get_rate_change_limits();
+        assert!(limits.is_none());
     }
 }
