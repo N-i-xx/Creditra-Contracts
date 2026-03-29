@@ -2024,6 +2024,16 @@ mod test_e2e_lifecycle_happy {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::testutils::Events as _;
     use soroban_sdk::token::{self, StellarAssetClient};
+    use soroban_sdk::TryFromVal;
+
+    fn has_event(env: &Env, topic1: Symbol) -> bool {
+        env.events().all().iter().any(|(_contract, topics, _data)| {
+            topics.len() == 2
+                && Symbol::try_from_val(env, &topics.get(1).unwrap())
+                    .map(|s: Symbol| s == topic1)
+                    .unwrap_or(false)
+        })
+    }
 
     /// Full lifecycle: open → draw → full repay → close.
     #[test]
@@ -2038,8 +2048,7 @@ mod test_e2e_lifecycle_happy {
         let client = CreditClient::new(&env, &contract_id);
 
         // Deploy a mock liquidity token (Stellar Asset Contract).
-        let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin);
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env));
         let token_address = token_id.address();
         let sac = StellarAssetClient::new(&env, &token_address);
         let token = token::Client::new(&env, &token_address);
@@ -2047,27 +2056,14 @@ mod test_e2e_lifecycle_happy {
         // ── Step 1: init + open credit line ──────────────────────────────────
         client.init(&admin);
         client.set_liquidity_token(&token_address);
-
-        // Fund the contract (liquidity reserve) with 1 000 tokens.
         sac.mint(&contract_id, &1_000_i128);
-
         client.open_credit_line(&borrower, &1_000_i128, &300_u32, &70_u32);
 
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(line.status, CreditStatus::Active);
         assert_eq!(line.utilized_amount, 0);
         assert_eq!(line.credit_limit, 1_000);
-
-        // Verify "opened" event was emitted.
-        let events = env.events().all();
-        let opened_event = events.iter().find(|e| {
-            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.0.clone();
-            topics.len() == 2
-                && soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap())
-                    .map(|s: soroban_sdk::Symbol| s == soroban_sdk::symbol_short!("opened"))
-                    .unwrap_or(false)
-        });
-        assert!(opened_event.is_some(), "expected 'opened' event");
+        assert!(has_event(&env, symbol_short!("opened")), "expected 'opened' event");
 
         // ── Step 2: draw 600 ─────────────────────────────────────────────────
         client.draw_credit(&borrower, &600_i128);
@@ -2075,62 +2071,27 @@ mod test_e2e_lifecycle_happy {
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(line.status, CreditStatus::Active);
         assert_eq!(line.utilized_amount, 600);
-
-        // Reserve decreased; borrower received tokens.
         assert_eq!(token.balance(&contract_id), 400_i128);
         assert_eq!(token.balance(&borrower), 600_i128);
-
-        // Verify "drawn" event.
-        let events = env.events().all();
-        let drawn_event = events.iter().find(|e| {
-            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.0.clone();
-            topics.len() == 2
-                && soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap())
-                    .map(|s: soroban_sdk::Symbol| s == soroban_sdk::symbol_short!("drawn"))
-                    .unwrap_or(false)
-        });
-        assert!(drawn_event.is_some(), "expected 'drawn' event");
+        assert!(has_event(&env, symbol_short!("drawn")), "expected 'drawn' event");
 
         // ── Step 3: full repay 600 ───────────────────────────────────────────
         // Borrower must approve the contract to pull tokens via transfer_from.
         token.approve(&borrower, &contract_id, &600_i128, &1_000_u32);
-
         client.repay_credit(&borrower, &600_i128);
 
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(line.status, CreditStatus::Active);
         assert_eq!(line.utilized_amount, 0);
-
-        // Tokens returned to reserve (contract address = liquidity source by default).
         assert_eq!(token.balance(&borrower), 0_i128);
         assert_eq!(token.balance(&contract_id), 1_000_i128);
-
-        // Verify "repay" event.
-        let events = env.events().all();
-        let repay_event = events.iter().find(|e| {
-            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.0.clone();
-            topics.len() == 2
-                && soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap())
-                    .map(|s: soroban_sdk::Symbol| s == soroban_sdk::symbol_short!("repay"))
-                    .unwrap_or(false)
-        });
-        assert!(repay_event.is_some(), "expected 'repay' event");
+        assert!(has_event(&env, symbol_short!("repay")), "expected 'repay' event");
 
         // ── Step 4: borrower self-closes (zero utilization) ──────────────────
         client.close_credit_line(&borrower, &borrower);
 
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(line.status, CreditStatus::Closed);
-
-        // Verify "closed" event.
-        let events = env.events().all();
-        let closed_event = events.iter().find(|e| {
-            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.0.clone();
-            topics.len() == 2
-                && soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap())
-                    .map(|s: soroban_sdk::Symbol| s == soroban_sdk::symbol_short!("closed"))
-                    .unwrap_or(false)
-        });
-        assert!(closed_event.is_some(), "expected 'closed' event");
+        assert!(has_event(&env, symbol_short!("closed")), "expected 'closed' event");
     }
 }
