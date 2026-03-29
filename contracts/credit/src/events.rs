@@ -48,15 +48,14 @@ pub struct DrawnEvent {
     pub timestamp: u64,
 }
 
-/// Event emitted when credit limit is decreased below utilized amount.
+/// Event emitted when interest is accrued and capitalized.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LimitDecreaseEvent {
+pub struct InterestAccruedEvent {
     pub borrower: Address,
-    pub old_limit: i128,
-    pub new_limit: i128,
-    pub utilized_amount: i128,
-    pub excess_amount: i128,
+    pub accrued_amount: i128,
+    pub total_accrued_interest: i128,
+    pub new_utilized_amount: i128,
     pub timestamp: u64,
 }
 
@@ -83,8 +82,8 @@ pub fn publish_risk_parameters_updated(env: &Env, event: RiskParametersUpdatedEv
         .publish((symbol_short!("credit"), symbol_short!("risk_upd")), event);
 }
 
-/// Publish a limit decrease event.
-pub fn publish_limit_decrease_event(env: &Env, event: LimitDecreaseEvent) {
+/// Publish an interest accrued event.
+pub fn publish_interest_accrued_event(env: &Env, event: InterestAccruedEvent) {
     env.events()
-        .publish((symbol_short!("credit"), symbol_short!("limit_dec")), event);
+        .publish((symbol_short!("credit"), symbol_short!("accrue")), event);
 }

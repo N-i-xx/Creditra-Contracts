@@ -57,6 +57,12 @@ pub struct CreditLineData {
     /// Ledger timestamp of the last interest-rate update via `update_risk_parameters`.
     /// Zero means no rate update has occurred yet.
     pub last_rate_update_ts: u64,
+    /// Total accrued interest that has been added to the utilized amount.
+    /// This tracks the cumulative interest that has been capitalized.
+    pub accrued_interest: i128,
+    /// Ledger timestamp of the last interest accrual calculation.
+    /// Zero means no accrual has been calculated yet.
+    pub last_accrual_ts: u64,
 }
 
 /// Admin-configurable limits on interest-rate changes.
