@@ -401,64 +401,212 @@ Interest accrual logic is not yet implemented (`repay_credit` is a placeholder).
 
 ---
 
-## Deployment and CLI Usage
+## Deployment Playbook
 
-### Build
+This section covers deploying the credit contract to Stellar testnet and invoking its core methods. All examples use the [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli) (`stellar`).
+
+### Prerequisites
+
+- Rust with `wasm32-unknown-unknown` target: `rustup target add wasm32-unknown-unknown`
+- Stellar CLI installed: `cargo install --locked stellar-cli --features opt`
+- A funded testnet identity (never commit private keys)
+
+### 1. Identity setup
+
 ```bash
-cargo build --target wasm32-unknown-unknown --release
+# Generate a new keypair and store it locally under an alias
+stellar keys generate --global admin --network testnet
+
+# Fund it via Friendbot
+stellar keys fund admin --network testnet
+
+# Confirm the address
+stellar keys address admin
 ```
 
-### Deploy
+For the backend/risk-engine identity used to open credit lines:
+
 ```bash
-soroban contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/credit.wasm \
-  --source <your-keypair> \
+stellar keys generate --global backend --network testnet
+stellar keys fund backend --network testnet
+```
+
+> Never commit secret keys. Use `--global` to store them in `~/.config/stellar/identity/` outside the repo.
+
+### 2. Build
+
+```bash
+cargo build --release --target wasm32-unknown-unknown -p creditra-credit
+```
+
+WASM output: `target/wasm32-unknown-unknown/release/creditra_credit.wasm`
+
+### 3. Deploy
+
+```bash
+stellar contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/creditra_credit.wasm \
+  --source admin \
   --network testnet
 ```
 
-### Initialize
+This prints a contract ID starting with `C`. Save it:
+
 ```bash
-soroban contract invoke \
-  --id <contract-id> \
-  --source <admin-keypair> \
-  --network testnet \
-  -- init \
-  --admin <admin-address>
+export CONTRACT_ID=<contract-id>
+export ADMIN=$(stellar keys address admin)
+export BORROWER=<borrower-address>
 ```
 
-### Open a Credit Line
+### 4. Initialize
+
 ```bash
-soroban contract invoke \
-  --id <contract-id> \
-  --source <backend-keypair> \
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- init \
+  --admin $ADMIN
+```
+
+### 5. Configure liquidity (optional)
+
+If you have a Stellar Asset Contract deployed for the reserve token:
+
+```bash
+# Set the token contract used for draw/repay transfers
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- set_liquidity_token \
+  --token_address <token-contract-id>
+
+# Set the reserve address that funds draws (defaults to the contract itself)
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- set_liquidity_source \
+  --reserve_address <reserve-address>
+```
+
+### 6. Open a credit line
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source backend \
   --network testnet \
   -- open_credit_line \
-  --borrower <borrower-address> \
+  --borrower $BORROWER \
   --credit_limit 5000 \
   --interest_rate_bps 300 \
   --risk_score 75
 ```
 
-### Get Credit Line
+### 7. Draw credit
+
+The borrower must authorize this call:
+
 ```bash
-soroban contract invoke \
-  --id <contract-id> \
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source <borrower-identity> \
   --network testnet \
-  -- get_credit_line \
-  --borrower <borrower-address>
+  -- draw_credit \
+  --borrower $BORROWER \
+  --amount 1000
 ```
 
-### Suspend / Close / Default
+### 8. Repay credit
+
 ```bash
-soroban contract invoke --id <contract-id> --source <admin-keypair> --network testnet -- suspend_credit_line --borrower <borrower-address>
-soroban contract invoke --id <contract-id> --source <admin-keypair> --network testnet -- close_credit_line --borrower <borrower-address>
-soroban contract invoke --id <contract-id> --source <admin-keypair> --network testnet -- default_credit_line --borrower <borrower-address>
-soroban contract invoke --id <contract-id> --source <admin-keypair> --network testnet -- reinstate_credit_line --borrower <borrower-address>
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source <borrower-identity> \
+  --network testnet \
+  -- repay_credit \
+  --borrower $BORROWER \
+  --amount 500
 ```
+
+### 9. Admin lifecycle operations
+
+```bash
+# Suspend
+stellar contract invoke --id $CONTRACT_ID --source admin --network testnet \
+  -- suspend_credit_line --borrower $BORROWER
+
+# Default
+stellar contract invoke --id $CONTRACT_ID --source admin --network testnet \
+  -- default_credit_line --borrower $BORROWER
+
+# Reinstate (Defaulted → Active)
+stellar contract invoke --id $CONTRACT_ID --source admin --network testnet \
+  -- reinstate_credit_line --borrower $BORROWER
+
+# Close (admin force-close)
+stellar contract invoke --id $CONTRACT_ID --source admin --network testnet \
+  -- close_credit_line --borrower $BORROWER --closer $ADMIN
+
+# Close (borrower self-close, only when utilized_amount == 0)
+stellar contract invoke --id $CONTRACT_ID --source <borrower-identity> --network testnet \
+  -- close_credit_line --borrower $BORROWER --closer $BORROWER
+```
+
+### 10. Read state
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --network testnet \
+  -- get_credit_line \
+  --borrower $BORROWER
+```
+
+### 11. Rate-change limits
+
+```bash
+# Set limits: max 200 bps per update, minimum 86400s (1 day) between changes
+stellar contract invoke --id $CONTRACT_ID --source admin --network testnet \
+  -- set_rate_change_limits \
+  --max_rate_change_bps 200 \
+  --rate_change_min_interval 86400
+
+# Read current config
+stellar contract invoke --id $CONTRACT_ID --network testnet \
+  -- get_rate_change_limits
+```
+
+### Network flags
+
+| Flag | Values |
+|---|---|
+| `--network` | `testnet`, `mainnet`, or a custom network alias |
+| `--source` | Identity alias (from `stellar keys generate`) or raw secret key |
+| `--rpc-url` | Override RPC endpoint (optional; CLI uses defaults for named networks) |
+| `--network-passphrase` | Required only when using `--rpc-url` with a custom network |
+
+### Security notes
+
+- Admin key controls all lifecycle operations. Use a hardware wallet or secure key management in production.
+- `draw_credit` and `repay_credit` use a reentrancy guard; concurrent calls from the same borrower will revert.
+- The liquidity reserve check in `draw_credit` reverts if the reserve balance is below the requested amount — ensure the reserve is funded before enabling draws.
+- `close_credit_line` is idempotent: calling it on an already-closed line is a no-op.
+- Rate-change limits (`set_rate_change_limits`) are optional. Without them, any rate change is allowed. Set them before opening credit lines in production.
+- Trust boundary: the contract trusts `env.ledger().timestamp()` for rate-change cooldown enforcement. This is suitable for coarse administrative spacing, not sub-second precision.
 
 ---
 
 ## Running Tests
+
 ```bash
-cargo test
+cargo test -p creditra-credit
+```
+
+Coverage (must stay ≥ 95% lines):
+
+```bash
+cargo llvm-cov --workspace --all-targets --fail-under-lines 95
 ```
