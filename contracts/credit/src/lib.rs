@@ -2113,15 +2113,10 @@ mod test_e2e_lifecycle_happy {
     use soroban_sdk::token::{self, StellarAssetClient};
     use soroban_sdk::TryFromVal;
 
-    fn has_event(env: &Env, topic1: Symbol) -> bool {
-        env.events().all().iter().any(|(_contract, topics, _data)| {
-            topics.len() >= 2
-                && topics
-                    .get(1)
-                    .and_then(|v| Symbol::try_from_val(env, &v).ok())
-                    .map(|s: Symbol| s == topic1)
-                    .unwrap_or(false)
-        })
+    fn last_event_topic1(env: &Env) -> Symbol {
+        let events = env.events().all();
+        let (_contract, topics, _data) = events.last().unwrap();
+        Symbol::try_from_val(env, &topics.get(1).unwrap()).unwrap()
     }
 
     /// Full lifecycle: open → draw → full repay → close.
@@ -2152,10 +2147,7 @@ mod test_e2e_lifecycle_happy {
         assert_eq!(line.status, CreditStatus::Active);
         assert_eq!(line.utilized_amount, 0);
         assert_eq!(line.credit_limit, 1_000);
-        assert!(
-            has_event(&env, symbol_short!("opened")),
-            "expected 'opened' event"
-        );
+        assert_eq!(last_event_topic1(&env), symbol_short!("opened"));
 
         // ── Step 2: draw 600 ─────────────────────────────────────────────────
         client.draw_credit(&borrower, &600_i128);
@@ -2165,10 +2157,7 @@ mod test_e2e_lifecycle_happy {
         assert_eq!(line.utilized_amount, 600);
         assert_eq!(token.balance(&contract_id), 400_i128);
         assert_eq!(token.balance(&borrower), 600_i128);
-        assert!(
-            has_event(&env, symbol_short!("drawn")),
-            "expected 'drawn' event"
-        );
+        assert_eq!(last_event_topic1(&env), symbol_short!("drawn"));
 
         // ── Step 3: full repay 600 ───────────────────────────────────────────
         // Borrower must approve the contract to pull tokens via transfer_from.
@@ -2180,19 +2169,13 @@ mod test_e2e_lifecycle_happy {
         assert_eq!(line.utilized_amount, 0);
         assert_eq!(token.balance(&borrower), 0_i128);
         assert_eq!(token.balance(&contract_id), 1_000_i128);
-        assert!(
-            has_event(&env, symbol_short!("repay")),
-            "expected 'repay' event"
-        );
+        assert_eq!(last_event_topic1(&env), symbol_short!("repay"));
 
         // ── Step 4: borrower self-closes (zero utilization) ──────────────────
         client.close_credit_line(&borrower, &borrower);
 
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(line.status, CreditStatus::Closed);
-        assert!(
-            has_event(&env, symbol_short!("closed")),
-            "expected 'closed' event"
-        );
+        assert_eq!(last_event_topic1(&env), symbol_short!("closed"));
     }
 }
