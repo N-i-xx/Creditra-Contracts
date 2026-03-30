@@ -177,10 +177,29 @@ pub fn open_credit_line(
         );
     }
 
-    /// Reinstate a defaulted credit line to Active (admin only).
+    /// Reinstate a defaulted credit line to Active or Suspended (admin only).
     ///
-    /// Allowed only when status is Defaulted. Transition: Defaulted → Active.
-    pub fn reinstate_credit_line(env: Env, borrower: Address) {
+    /// Allowed only when the current status is `Defaulted`.
+    /// Transition: `Defaulted → Active` or `Defaulted → Suspended`.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's address whose credit line is being reinstated.
+    /// - `target_status`: The desired post-reinstatement status. Must be either
+    ///   [`CreditStatus::Active`] or [`CreditStatus::Suspended`].
+    ///
+    /// # Panics
+    /// - If no credit line exists for the given borrower.
+    /// - If the credit line is not currently in `Defaulted` status.
+    /// - If `target_status` is not `Active` or `Suspended`.
+    ///
+    /// # Events
+    /// Emits a `("credit", "reinstate")` [`CreditLineEvent`] with the new status.
+    ///
+    /// # Invariants after reinstatement
+    /// - `utilized_amount` is preserved unchanged.
+    /// - `credit_limit`, `interest_rate_bps`, and `risk_score` are unchanged.
+    /// - Draws are re-enabled when target is `Active`; disabled when target is `Suspended`.
+    pub fn reinstate_credit_line(env: Env, borrower: Address, target_status: CreditStatus) {
         require_admin_auth(&env);
 
         let mut credit_line: CreditLineData = env
@@ -193,7 +212,11 @@ pub fn open_credit_line(
             panic!("credit line is not defaulted");
         }
 
-        credit_line.status = CreditStatus::Active;
+        if target_status != CreditStatus::Active && target_status != CreditStatus::Suspended {
+            panic!("target_status must be Active or Suspended");
+        }
+
+        credit_line.status = target_status;
         env.storage().persistent().set(&borrower, &credit_line);
 
         publish_credit_line_event(
@@ -202,7 +225,7 @@ pub fn open_credit_line(
             CreditLineEvent {
                 event_type: symbol_short!("reinstate"),
                 borrower: borrower.clone(),
-                status: CreditStatus::Active,
+                status: target_status,
                 credit_limit: credit_line.credit_limit,
                 interest_rate_bps: credit_line.interest_rate_bps,
                 risk_score: credit_line.risk_score,

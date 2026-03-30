@@ -21,7 +21,7 @@ use events::{
     publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, RepaymentEvent,
     RiskParametersUpdatedEvent,
 };
-use types::{CreditLineData, CreditStatus, RateChangeConfig};
+use types::{CreditLineData, CreditStatus, ContractError, RateChangeConfig};
 
 /// Maximum interest rate in basis points (100%).
 const MAX_INTEREST_RATE_BPS: u32 = 10_000;
@@ -95,12 +95,18 @@ impl Credit {
 
     /// @notice Sets the token contract used for reserve/liquidity checks and draw transfers.
     pub fn set_liquidity_token(env: Env, token_address: Address) {
-        config::set_liquidity_token(env, token_address)
+        require_admin_auth(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::LiquidityToken, &token_address);
     }
 
     /// @notice Sets the address that provides liquidity for draw operations.
     pub fn set_liquidity_source(env: Env, reserve_address: Address) {
-        config::set_liquidity_source(env, reserve_address)
+        require_admin_auth(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::LiquiditySource, &reserve_address);
     }
 
     /// Open a new credit line for a borrower (called by backend/risk engine).
@@ -138,6 +144,8 @@ impl Credit {
             risk_score,
             status: CreditStatus::Active,
             last_rate_update_ts: 0,
+            accrued_interest: 0,
+            last_accrual_ts: 0,
         };
 
         env.storage().persistent().set(&borrower, &credit_line);
@@ -478,12 +486,17 @@ impl Credit {
 
     /// Set rate-change limits (admin only).
     pub fn set_rate_change_limits(env: Env, max_rate_change_bps: u32, rate_change_min_interval: u64) {
-        risk::set_rate_change_limits(env, max_rate_change_bps, rate_change_min_interval)
+        require_admin_auth(&env);
+        let cfg = RateChangeConfig {
+            max_rate_change_bps,
+            rate_change_min_interval,
+        };
+        env.storage().instance().set(&rate_cfg_key(&env), &cfg);
     }
 
     /// Get the current rate-change limit configuration (view function).
     pub fn get_rate_change_limits(env: Env) -> Option<RateChangeConfig> {
-        risk::get_rate_change_limits(env)
+        env.storage().instance().get(&rate_cfg_key(&env))
     }
 
     /// Suspend a credit line (admin only).
@@ -603,6 +616,62 @@ impl Credit {
         );
     }
 
+    /// Reinstate a defaulted credit line to Active or Suspended (admin only).
+    ///
+    /// Allowed only when the current status is `Defaulted`.
+    /// Transition: `Defaulted → Active` or `Defaulted → Suspended`.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's address whose credit line is being reinstated.
+    /// - `target_status`: The desired post-reinstatement status. Must be either
+    ///   [`CreditStatus::Active`] or [`CreditStatus::Suspended`].
+    ///
+    /// # Panics
+    /// - If no credit line exists for the given borrower.
+    /// - If the credit line is not currently in `Defaulted` status.
+    /// - If `target_status` is not `Active` or `Suspended`.
+    ///
+    /// # Events
+    /// Emits a `("credit", "reinstate")` [`CreditLineEvent`] with the new status.
+    ///
+    /// # Invariants after reinstatement
+    /// - `utilized_amount` is preserved unchanged.
+    /// - `credit_limit`, `interest_rate_bps`, and `risk_score` are unchanged.
+    /// - Draws are re-enabled when target is `Active`; disabled when target is `Suspended`.
+    pub fn reinstate_credit_line(env: Env, borrower: Address, target_status: CreditStatus) {
+        require_admin_auth(&env);
+
+        let mut credit_line: CreditLineData = env
+            .storage()
+            .persistent()
+            .get(&borrower)
+            .expect("Credit line not found");
+
+        if credit_line.status != CreditStatus::Defaulted {
+            panic!("credit line is not defaulted");
+        }
+
+        if target_status != CreditStatus::Active && target_status != CreditStatus::Suspended {
+            panic!("target_status must be Active or Suspended");
+        }
+
+        credit_line.status = target_status;
+        env.storage().persistent().set(&borrower, &credit_line);
+
+        publish_credit_line_event(
+            &env,
+            (symbol_short!("credit"), symbol_short!("reinstate")),
+            CreditLineEvent {
+                event_type: symbol_short!("reinstate"),
+                borrower: borrower.clone(),
+                status: target_status,
+                credit_limit: credit_line.credit_limit,
+                interest_rate_bps: credit_line.interest_rate_bps,
+                risk_score: credit_line.risk_score,
+            },
+        );
+    }
+
     /// Get credit line data for a borrower (view function).
     ///
     /// # Parameters
@@ -611,7 +680,7 @@ impl Credit {
     /// # Returns
     /// `Option<CreditLineData>` — full data or `None` if no line exists.
     pub fn get_credit_line(env: Env, borrower: Address) -> Option<CreditLineData> {
-        query::get_credit_line(env, borrower)
+        env.storage().persistent().get(&borrower)
     }
 }
 
@@ -1189,7 +1258,7 @@ mod test_smoke_coverage {
 
         client.suspend_credit_line(&borrower);
         client.default_credit_line(&borrower);
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
 
         sac.mint(&borrower, &100_i128);
         TokenClient::new(&env, &token_address).approve(
@@ -1403,7 +1472,7 @@ mod test_coverage_gaps {
         let env = Env::default();
         let (client, _admin, borrower) = base_setup(&env);
         // Line is Active, not Defaulted
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
     }
 
     #[test]
@@ -1413,7 +1482,7 @@ mod test_coverage_gaps {
         let (client, _admin, borrower) = base_setup(&env);
         client.suspend_credit_line(&borrower);
         // Line is Suspended, not Defaulted
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
     }
 
     // ── open_credit_line: allows reopening after Closed status ───────────────
@@ -1445,7 +1514,7 @@ mod test_coverage_gaps {
         let borrower = Address::generate(&env);
         let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
         client.default_credit_line(&borrower);
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
         let events = env.events().all();
         let (_contract, topics, data) = events.last().unwrap();
         assert_eq!(
@@ -1475,7 +1544,7 @@ mod test_coverage_gaps {
         client.repay_credit(&borrower, &50_i128);
         client.suspend_credit_line(&borrower);
         client.default_credit_line(&borrower);
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
         client.close_credit_line(&borrower, &admin);
 
         let events = env.events().all();
