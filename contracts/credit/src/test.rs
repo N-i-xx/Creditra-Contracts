@@ -743,7 +743,7 @@ use soroban_sdk::{Address, Env};
 
     /// Defaulted → Suspended: draws are still blocked.
     #[test]
-    #[should_panic(expected = "draws are not allowed")]
+    #[should_panic(expected = "credit line is suspended")]
     fn test_reinstate_to_suspended_blocks_draws() {
         let env = Env::default();
         env.mock_all_auths();

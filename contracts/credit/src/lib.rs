@@ -22,7 +22,7 @@ use events::{
     publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, RepaymentEvent,
     RiskParametersUpdatedEvent,
 };
-use types::{CreditLineData, CreditStatus, ContractError, RateChangeConfig};
+use types::{ContractError, CreditLineData, CreditStatus, RateChangeConfig};
 
 /// Maximum interest rate in basis points (100%).
 const MAX_INTEREST_RATE_BPS: u32 = 10_000;
@@ -486,7 +486,11 @@ impl Credit {
     }
 
     /// Set rate-change limits (admin only).
-    pub fn set_rate_change_limits(env: Env, max_rate_change_bps: u32, rate_change_min_interval: u64) {
+    pub fn set_rate_change_limits(
+        env: Env,
+        max_rate_change_bps: u32,
+        rate_change_min_interval: u64,
+    ) {
         require_admin_auth(&env);
         let cfg = RateChangeConfig {
             max_rate_change_bps,
@@ -1373,11 +1377,23 @@ mod test_smoke_coverage {
         client.init(&admin);
         client.open_credit_line(&borrower1, &1000_i128, &500_u32, &60_u32);
         client.open_credit_line(&borrower2, &2000_i128, &300_u32, &50_u32);
-        assert_eq!(client.get_credit_line(&borrower1).unwrap().credit_limit, 1000);
-        assert_eq!(client.get_credit_line(&borrower2).unwrap().credit_limit, 2000);
+        assert_eq!(
+            client.get_credit_line(&borrower1).unwrap().credit_limit,
+            1000
+        );
+        assert_eq!(
+            client.get_credit_line(&borrower2).unwrap().credit_limit,
+            2000
+        );
         client.default_credit_line(&borrower1);
-        assert_eq!(client.get_credit_line(&borrower1).unwrap().status, CreditStatus::Defaulted);
-        assert_eq!(client.get_credit_line(&borrower2).unwrap().status, CreditStatus::Active);
+        assert_eq!(
+            client.get_credit_line(&borrower1).unwrap().status,
+            CreditStatus::Defaulted
+        );
+        assert_eq!(
+            client.get_credit_line(&borrower2).unwrap().status,
+            CreditStatus::Active
+        );
     }
 
     #[test]
@@ -2091,5 +2107,109 @@ mod test_rate_change_limits {
         client.init(&admin);
 
         client.set_rate_change_limits(&100_u32, &0_u64);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Coverage: events.rs v2 publish functions and interest accrual event
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod test_events_coverage {
+    use super::*;
+    use events::{
+        publish_credit_line_event_v2, publish_drawn_event_v2, publish_interest_accrued_event,
+        publish_repayment_event_v2, CreditLineEventV2, DrawnEventV2, InterestAccruedEvent,
+        RepaymentEventV2,
+    };
+    use soroban_sdk::testutils::Address as _;
+
+    #[test]
+    fn publish_credit_line_event_v2_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(Credit, ());
+        let borrower = Address::generate(&env);
+        let actor = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            publish_credit_line_event_v2(
+                &env,
+                (symbol_short!("credit"), symbol_short!("opened")),
+                CreditLineEventV2 {
+                    event_type: symbol_short!("opened"),
+                    borrower: borrower.clone(),
+                    status: CreditStatus::Active,
+                    credit_limit: 1_000,
+                    interest_rate_bps: 300,
+                    risk_score: 70,
+                    timestamp: 0,
+                    actor: actor.clone(),
+                    amount: 0,
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn publish_repayment_event_v2_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(Credit, ());
+        let borrower = Address::generate(&env);
+        let payer = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            publish_repayment_event_v2(
+                &env,
+                RepaymentEventV2 {
+                    borrower: borrower.clone(),
+                    payer: payer.clone(),
+                    amount: 200,
+                    new_utilized_amount: 300,
+                    timestamp: 0,
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn publish_drawn_event_v2_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(Credit, ());
+        let borrower = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let reserve = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            publish_drawn_event_v2(
+                &env,
+                DrawnEventV2 {
+                    borrower: borrower.clone(),
+                    recipient: recipient.clone(),
+                    reserve_source: reserve.clone(),
+                    amount: 100,
+                    new_utilized_amount: 100,
+                    timestamp: 0,
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn publish_interest_accrued_event_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(Credit, ());
+        let borrower = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            publish_interest_accrued_event(
+                &env,
+                InterestAccruedEvent {
+                    borrower: borrower.clone(),
+                    accrued_amount: 10,
+                    total_accrued_interest: 10,
+                    new_utilized_amount: 510,
+                    timestamp: 0,
+                },
+            );
+        });
     }
 }
