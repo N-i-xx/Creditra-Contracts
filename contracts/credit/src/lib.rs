@@ -1192,6 +1192,138 @@ mod test {
         assert_eq!(after.status, before.status);
         assert_eq!(after.utilized_amount, before.utilized_amount - 300);
     }
+
+    // ── draw_credit: Suspended and Defaulted status blocks ───────────────────
+
+    #[test]
+    #[should_panic(expected = "credit line is suspended")]
+    fn draw_credit_rejected_when_suspended() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let client = CreditClient::new(&env, &env.register(Credit, ()));
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1_000, &300_u32, &70_u32);
+        client.suspend_credit_line(&borrower);
+        client.draw_credit(&borrower, &100);
+    }
+
+    #[test]
+    #[should_panic(expected = "credit line is defaulted")]
+    fn draw_credit_rejected_when_defaulted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let client = CreditClient::new(&env, &env.register(Credit, ()));
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1_000, &300_u32, &70_u32);
+        client.default_credit_line(&borrower);
+        client.draw_credit(&borrower, &100);
+    }
+
+    // ── repay_credit: token-configured paths ─────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Insufficient allowance")]
+    fn repay_credit_insufficient_allowance_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env));
+        let sac = StellarAssetClient::new(&env, &token_id.address());
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+        client.set_liquidity_token(&token_id.address());
+        sac.mint(&contract_id, &1_000);
+        client.open_credit_line(&borrower, &1_000, &300_u32, &70_u32);
+        client.draw_credit(&borrower, &500);
+        // borrower has no allowance set — repay must fail
+        sac.mint(&borrower, &500);
+        client.repay_credit(&borrower, &500);
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient balance")]
+    fn repay_credit_insufficient_balance_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env));
+        let sac = StellarAssetClient::new(&env, &token_id.address());
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+        client.set_liquidity_token(&token_id.address());
+        sac.mint(&contract_id, &1_000);
+        client.open_credit_line(&borrower, &1_000, &300_u32, &70_u32);
+        client.draw_credit(&borrower, &500);
+        // approve but no balance
+        soroban_sdk::token::Client::new(&env, &token_id.address())
+            .approve(&borrower, &contract_id, &500, &1_000_u32);
+        client.repay_credit(&borrower, &500);
+    }
+
+    // ── repay_credit: zero utilization with token skips transfer ─────────────
+
+    #[test]
+    fn repay_credit_zero_utilization_with_token_skips_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env));
+        let sac = StellarAssetClient::new(&env, &token_id.address());
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+        client.set_liquidity_token(&token_id.address());
+        sac.mint(&contract_id, &1_000);
+        client.open_credit_line(&borrower, &1_000, &300_u32, &70_u32);
+        // no draw — utilized_amount is 0, effective_repay will be 0, token transfer skipped
+        client.repay_credit(&borrower, &100);
+        assert_eq!(client.get_credit_line(&borrower).unwrap().utilized_amount, 0);
+    }
+
+    // ── rate-change limits ────────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "rate change too soon: minimum interval not elapsed")]
+    fn update_risk_params_rate_change_too_soon_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let client = CreditClient::new(&env, &env.register(Credit, ()));
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1_000, &300_u32, &70_u32);
+        client.set_rate_change_limits(&500_u32, &3600_u64);
+        // first update sets last_rate_update_ts
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        client.update_risk_parameters(&borrower, &1_000, &400_u32, &70_u32);
+        // second update too soon (only 100s elapsed, need 3600)
+        env.ledger().with_mut(|l| l.timestamp = 1100);
+        client.update_risk_parameters(&borrower, &1_000, &500_u32, &70_u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "rate change exceeds maximum allowed delta")]
+    fn update_risk_params_rate_delta_too_large_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let client = CreditClient::new(&env, &env.register(Credit, ()));
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1_000, &300_u32, &70_u32);
+        client.set_rate_change_limits(&50_u32, &0_u64);
+        // delta = |700 - 300| = 400 > 50
+        client.update_risk_parameters(&borrower, &1_000, &700_u32, &70_u32);
+    }
 }
 
 #[cfg(test)]
