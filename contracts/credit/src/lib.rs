@@ -13,6 +13,10 @@
 mod auth;
 mod config;
 mod events;
+mod lifecycle;
+mod query;
+mod risk;
+mod storage;
 pub mod types;
 mod auth;
 mod storage;
