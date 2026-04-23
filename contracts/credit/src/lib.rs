@@ -503,6 +503,7 @@ mod test {
     use soroban_sdk::token::StellarAssetClient;
     use soroban_sdk::Symbol;
     use soroban_sdk::{TryFromVal, TryIntoVal};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     fn setup<'a>(
         env: &'a Env,
@@ -867,6 +868,67 @@ mod test {
         approve(&env, &token, &borrower, &contract_id, 200);
 
         client.repay_credit(&borrower, &200);
+    }
+
+    #[test]
+    fn repay_insufficient_allowance_does_not_change_credit_line_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, token, contract_id, _admin) = setup(&env, &borrower, 1_000, 1_000, 200);
+
+        StellarAssetClient::new(&env, &token).mint(&borrower, &200);
+        approve(&env, &token, &borrower, &contract_id, 50);
+
+        let credit_line_before = client.get_credit_line(&borrower).unwrap();
+        let token_client = token::Client::new(&env, &token);
+        let balance_before = token_client.balance(&borrower);
+        let allowance_before = token_client.allowance(&borrower, &contract_id);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.repay_credit(&borrower, &200);
+        }));
+
+        assert!(result.is_err(), "expected repay_credit to panic on insufficient allowance");
+
+        let credit_line_after = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(credit_line_after.utilized_amount, credit_line_before.utilized_amount);
+        assert_eq!(credit_line_after.accrued_interest, credit_line_before.accrued_interest);
+        assert_eq!(credit_line_after.last_accrual_ts, credit_line_before.last_accrual_ts);
+
+        assert_eq!(token_client.balance(&borrower), balance_before);
+        assert_eq!(token_client.allowance(&borrower, &contract_id), allowance_before);
+    }
+
+    #[test]
+    fn repay_insufficient_balance_does_not_change_credit_line_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, token, contract_id, _admin) = setup(&env, &borrower, 1_000, 1_000, 200);
+
+        let token_client = token::Client::new(&env, &token);
+        let other = Address::generate(&env);
+        token_client.transfer(&borrower, &other, &150);
+        approve(&env, &token, &borrower, &contract_id, 200);
+
+        let credit_line_before = client.get_credit_line(&borrower).unwrap();
+        let balance_before = token_client.balance(&borrower);
+        let allowance_before = token_client.allowance(&borrower, &contract_id);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.repay_credit(&borrower, &200);
+        }));
+
+        assert!(result.is_err(), "expected repay_credit to panic on insufficient balance");
+
+        let credit_line_after = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(credit_line_after.utilized_amount, credit_line_before.utilized_amount);
+        assert_eq!(credit_line_after.accrued_interest, credit_line_before.accrued_interest);
+        assert_eq!(credit_line_after.last_accrual_ts, credit_line_before.last_accrual_ts);
+
+        assert_eq!(token_client.balance(&borrower), balance_before);
+        assert_eq!(token_client.allowance(&borrower, &contract_id), allowance_before);
     }
 
     // ── 10. RepaymentEvent schema ─────────────────────────────────────────────
