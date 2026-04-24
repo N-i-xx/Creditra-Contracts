@@ -57,6 +57,70 @@ pub fn compute_rate_from_score(cfg: &RateFormulaConfig, risk_score: u32) -> u32 
 /// * If credit line does not exist.
 /// * If validation fails (limit < utilization, score > 100, etc.).
 /// * If rate change exceeds configured limits.
+pub fn get_rate_formula_config(env: Env) -> Option<RateFormulaConfig> {
+    env.storage()
+        .instance()
+        .get::<_, RateFormulaConfig>(&rate_formula_key(&env))
+}
+
+pub fn set_rate_formula_config(
+    env: Env,
+    base_rate_bps: u32,
+    slope_bps_per_score: u32,
+    min_rate_bps: u32,
+    max_rate_bps: u32,
+) {
+    require_admin_auth(&env);
+
+    if min_rate_bps > max_rate_bps {
+        panic!("min_rate_bps cannot exceed max_rate_bps");
+    }
+    if max_rate_bps > MAX_INTEREST_RATE_BPS {
+        panic!("max_rate_bps exceeds maximum");
+    }
+    if base_rate_bps > MAX_INTEREST_RATE_BPS {
+        panic!("base_rate_bps exceeds maximum");
+    }
+
+    let cfg = RateFormulaConfig {
+        base_rate_bps,
+        slope_bps_per_score,
+        min_rate_bps,
+        max_rate_bps,
+    };
+
+    env.storage()
+        .instance()
+        .set(&rate_formula_key(&env), &cfg);
+
+    publish_rate_formula_config_event(
+        &env,
+        RateFormulaConfigEvent {
+            base_rate_bps,
+            slope_bps_per_score,
+            min_rate_bps,
+            max_rate_bps,
+            enabled: true,
+        },
+    );
+}
+
+pub fn clear_rate_formula_config(env: Env) {
+    require_admin_auth(&env);
+    env.storage().instance().remove(&rate_formula_key(&env));
+
+    publish_rate_formula_config_event(
+        &env,
+        RateFormulaConfigEvent {
+            base_rate_bps: 0,
+            slope_bps_per_score: 0,
+            min_rate_bps: 0,
+            max_rate_bps: 0,
+            enabled: false,
+        },
+    );
+}
+
 pub fn update_risk_parameters(
     env: Env,
     borrower: Address,
