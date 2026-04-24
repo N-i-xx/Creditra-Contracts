@@ -585,7 +585,13 @@ impl Credit {
         lifecycle::default_credit_line(env, borrower)
     }
 
-// duplicate wrapper removed
+    /// Reinstate a Defaulted credit line back to Active (admin only).
+    ///
+    /// # Errors
+    /// Panics if the credit line is not in `Defaulted` status.
+    pub fn reinstate_credit_line(env: Env, borrower: Address) {
+        lifecycle::reinstate_credit_line(env, borrower)
+    }
 
     /// Get credit line data for a borrower (view function).
     pub fn get_credit_line(env: Env, borrower: Address) -> Option<CreditLineData> {
