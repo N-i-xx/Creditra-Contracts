@@ -333,24 +333,27 @@ These tests validate behavior near `i128::MAX` and confirm overflow handling rem
 
 ## Error Codes
 
-The `Credit` contract uses standard `u32` discriminants for standardized error handling across the Rust and TypeScript SDK clients. Integrator clients can match these error codes to understand failure reasons.
+The `Credit` contract uses stable `u32` discriminants for standardized error handling across the Rust and TypeScript SDK clients. Discriminants are **permanent** — they are never reordered or renumbered. See [`docs/errors.md`](errors.md) for the full reference including resolution guidance and security notes.
 
-| Error Code | Variant              | Description                                                                 |
-| ---------- | -------------------- | --------------------------------------------------------------------------- |
-| `1`        | `Unauthorized`       | Caller is not authorized to perform this action.                            |
-| `2`        | `NotAdmin`           | Caller does not have admin privileges.                                      |
-| `3`        | `CreditLineNotFound` | The specified credit line was not found.                                    |
-| `4`        | `CreditLineClosed`   | Action cannot be performed because the credit line is closed.               |
-| `5`        | `InvalidAmount`      | The requested amount is invalid (e.g., zero or negative).                   |
-| `6`        | `OverLimit`          | The requested draw exceeds the available credit limit.                      |
-| `7`        | `NegativeLimit`      | The credit limit cannot be negative.                                        |
-| `8`        | `RateTooHigh`        | The interest rate change exceeds the maximum allowed delta.                 |
-| `9`        | `ScoreTooHigh`       | The risk score is above the acceptable maximum threshold.                   |
-| `10`       | `UtilizationNotZero` | Action cannot be performed because the credit line utilization is not zero. |
-| `11`       | `Reentrancy`         | Reentrancy detected during cross-contract calls.                            |
-| `12`       | `Overflow`           | Math overflow occurred during calculation.                                  |
-| `13`       | `LimitDecreaseRequiresRepayment` | Credit limit decrease requires immediate repayment of excess amount. |
-| `14`       | `AlreadyInitialized` | Contract has already been initialized; `init` may only be called once.      |
+| Code | Variant                          | Description |
+|------|----------------------------------|-------------|
+| `1`  | `Unauthorized`                   | Caller is not authorized to perform this action. |
+| `2`  | `NotAdmin`                       | Caller does not have admin privileges. |
+| `3`  | `CreditLineNotFound`             | The specified credit line was not found. |
+| `4`  | `CreditLineClosed`               | Action cannot be performed because the credit line is closed. |
+| `5`  | `InvalidAmount`                  | The requested amount is invalid (e.g., zero or negative). |
+| `6`  | `OverLimit`                      | The requested draw exceeds the available credit limit. |
+| `7`  | `NegativeLimit`                  | The credit limit cannot be negative. |
+| `8`  | `RateTooHigh`                    | The interest rate change exceeds the maximum allowed delta. |
+| `9`  | `ScoreTooHigh`                   | The risk score is above the acceptable maximum threshold. |
+| `10` | `UtilizationNotZero`             | Action cannot be performed because the credit line utilization is not zero. |
+| `11` | `Reentrancy`                     | Reentrancy detected during cross-contract calls. |
+| `12` | `Overflow`                       | Math overflow occurred during calculation. |
+| `13` | `LimitDecreaseRequiresRepayment` | Credit limit decrease requires immediate repayment of excess amount. |
+| `14` | `AlreadyInitialized`             | Contract has already been initialized; `init` may only be called once. |
+| `15` | `AdminAcceptTooEarly`            | `accept_admin` called before the mandatory delay has elapsed. |
+| `16` | `BorrowerBlocked`                | Borrower is on the block list; draws are disabled. |
+| `17` | `DrawExceedsMaxAmount`           | Draw amount exceeds the per-transaction cap set by the admin. |
 
 ---
 
