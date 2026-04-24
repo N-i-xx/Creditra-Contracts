@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 
-//! Core data types for the Credit contract.
+//! Core data types for the Creditra contract.
 
 use soroban_sdk::{contracttype, Address};
 
@@ -53,20 +55,19 @@ pub enum ContractError {
     LimitDecreaseRequiresRepayment = 13,
     /// Contract has already been initialized; `init` may only be called once.
     AlreadyInitialized = 14,
-    /// Admin acceptance called before the required delay period has elapsed.
-    AdminAcceptTooEarly = 15,
-    /// The requested draw exceeds the configured maximum draw amount per transaction.
+    /// All draws are globally frozen by admin for liquidity reserve operations.
+    DrawsFrozen = 15,
+    /// The requested draw exceeds the configured per-transaction maximum.
     DrawExceedsMaxAmount = 16,
-    /// The borrower is blocked from drawing credit.
+    /// Borrower is blocked from drawing credit.
     BorrowerBlocked = 17,
-    /// Action cannot be performed because the credit line is suspended.
-    CreditLineSuspended = 18,
-    /// Action cannot be performed because the credit line is defaulted.
-    CreditLineDefaulted = 19,
+    /// Admin acceptance attempted before the delay window has elapsed.
+    AdminAcceptTooEarly = 18,
 }
 
 /// Stored credit line data for a borrower.
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreditLineData {
     /// Address of the borrower.
     pub borrower: Address,
@@ -100,6 +101,7 @@ pub struct RateChangeConfig {
     /// Minimum elapsed seconds between two consecutive rate changes.
     pub rate_change_min_interval: u64,
 }
+}
 
 /// Admin-configurable piecewise-linear rate formula.
 ///
@@ -127,4 +129,16 @@ pub struct RateFormulaConfig {
     pub min_rate_bps: u32,
     /// Maximum allowed computed rate (ceiling), must be <= 10_000.
     pub max_rate_bps: u32,
+}
+
+/// Structured representation of the contract's API version (semver).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContractVersion {
+    /// Incremented on breaking ABI or storage layout changes.
+    pub major: u32,
+    /// Incremented on backward-compatible feature additions.
+    pub minor: u32,
+    /// Incremented on backward-compatible bug fixes.
+    pub patch: u32,
 }

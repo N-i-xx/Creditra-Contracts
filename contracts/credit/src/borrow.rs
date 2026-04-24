@@ -1,3 +1,3 @@
 // SPDX-License-Identifier: MIT
-
-//! This module is deprecated. Core logic for draw/repay has been consolidated into lib.rs.
+//! Borrow module: draw and repay helpers (upstream addition).
+//! Core draw/repay logic lives in lib.rs; this module is reserved for future extraction.

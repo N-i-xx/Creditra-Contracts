@@ -1,3 +1,3 @@
 // SPDX-License-Identifier: MIT
-
-//! This module is deprecated. Configuration logic has been consolidated into lib.rs.
+//! Config module: admin-configurable contract parameters (upstream addition).
+//! Configuration logic (rate limits, formula config) lives in lib.rs and risk.rs.
