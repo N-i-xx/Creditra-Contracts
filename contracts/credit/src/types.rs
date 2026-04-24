@@ -67,3 +67,17 @@ pub struct RateChangeConfig {
     pub max_rate_change_bps: u32,
     pub rate_change_min_interval: u64,
 }
+
+/// Global protocol configuration returned by `get_protocol_config`.
+///
+/// All fields are optional — absent means the value has not been set yet:
+/// - `liquidity_token`: `None` until `set_liquidity_token` is called.
+/// - `liquidity_source`: always present (defaults to the contract address on `init`).
+/// - `rate_change_config`: `None` until `set_rate_change_limits` is called.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolConfig {
+    pub liquidity_token: Option<Address>,
+    pub liquidity_source: Option<Address>,
+    pub rate_change_config: Option<RateChangeConfig>,
+}
