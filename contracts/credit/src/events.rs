@@ -175,6 +175,16 @@ pub struct AdminRotationAcceptedEvent {
     pub new_admin: Address,
 }
 
+pub fn publish_admin_rotation_proposed(env: &Env, event: AdminRotationProposedEvent) {
+    env.events()
+        .publish((symbol_short!("admin"), symbol_short!("proposed")), event);
+}
+
+pub fn publish_admin_rotation_accepted(env: &Env, event: AdminRotationAcceptedEvent) {
+    env.events()
+        .publish((symbol_short!("admin"), symbol_short!("accepted")), event);
+}
+
 /// Publish a credit line lifecycle event.
 pub fn publish_credit_line_event(env: &Env, topic: (Symbol, Symbol), event: CreditLineEvent) {
     env.events().publish(topic, event);
