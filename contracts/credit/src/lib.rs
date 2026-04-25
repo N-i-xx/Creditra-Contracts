@@ -115,11 +115,27 @@ impl Credit {
 
     /// @notice Sets the token contract used for reserve/liquidity checks and draw transfers.
     pub fn set_liquidity_token(env: Env, token_address: Address) {
-        config::set_liquidity_token(env, token_address)
+        require_admin_auth(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::LiquidityToken, &token_address);
     }
 
     pub fn set_liquidity_source(env: Env, reserve_address: Address) {
-        config::set_liquidity_source(env, reserve_address)
+        require_admin_auth(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::LiquiditySource, &reserve_address);
+    }
+
+    /// Return the current liquidity source address (view function).
+    ///
+    /// Defaults to the contract's own address until overridden by `set_liquidity_source`.
+    pub fn get_liquidity_source(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::LiquiditySource)
+            .unwrap_or_else(|| env.current_contract_address())
     }
 
     /// Open a new credit line for a borrower.
@@ -480,7 +496,7 @@ impl Credit {
     ///
     /// Returns `None` if no limits have been configured yet.
     pub fn get_rate_change_limits(env: Env) -> Option<RateChangeConfig> {
-        risk::get_rate_change_limits(env)
+        env.storage().instance().get(&rate_cfg_key(&env))
     }
 
     // ── Grace period policy ───────────────────────────────────────────────────
@@ -677,6 +693,9 @@ mod test_rate_change_limits {
         env.mock_all_auths();
         let admin = Address::generate(env);
         let contract_id = env.register(Credit, ());
+        let token_admin = Address::generate(env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin);
+        let token_address = token_id.address();
         let client = CreditClient::new(env, &contract_id);
         client.init(&admin);
         let token_id = env.register_stellar_asset_contract_v2(Address::generate(env));
