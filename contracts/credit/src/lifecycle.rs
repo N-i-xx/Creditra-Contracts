@@ -1,8 +1,73 @@
+// SPDX-License-Identifier: MIT
+
+//! Credit line lifecycle management: suspend, close, default, reinstate, and liquidation settlement.
+//!
+//! # Storage
+//! - **Borrower credit lines**: Persistent storage (independent TTL per borrower)
+//!   - Key: `borrower: Address`
+//!   - Value: `CreditLineData`
+//! - **Liquidation settlement markers**: Persistent storage (replay protection)
+//!   - Key: `(Symbol("liq_seen"), borrower, settlement_id)`
+//!   - Value: `bool`
+
 use crate::auth::{require_admin, require_admin_auth};
 use crate::events::{publish_credit_line_event, CreditLineEvent};
-use crate::types::{CreditLineData, CreditStatus};
-use soroban_sdk::{symbol_short, Address, Env};
+use crate::risk::{MAX_INTEREST_RATE_BPS, MAX_RISK_SCORE};
+use crate::storage::assert_not_paused;
+use crate::types::{ContractError, CreditLineData, CreditStatus};
+use soroban_sdk::{symbol_short, Address, Env, Symbol};
 
+/// Generate a unique key for tracking liquidation settlements.
+///
+/// # Storage
+/// - **Type**: Persistent storage (independent TTL per settlement)
+/// - **Key**: `(Symbol("liq_seen"), borrower, settlement_id)`
+/// - **Purpose**: Prevents replay of the same liquidation settlement
+fn liquidation_settlement_key(borrower: &Address, settlement_id: &Symbol) -> (Symbol, Address, Symbol) {
+    (
+        symbol_short!("liq_seen"),
+        borrower.clone(),
+        settlement_id.clone(),
+    )
+}
+
+fn suspend_credit_line_internal(env: &Env, borrower: Address) {
+    let mut credit_line: CreditLineData = env
+        .storage()
+        .persistent()
+        .get(&borrower)
+        .expect("Credit line not found");
+
+    // Apply interest accrual before any mutation.
+    credit_line = crate::accrual::apply_accrual(env, credit_line);
+
+    if credit_line.status != CreditStatus::Active {
+        panic!("Only active credit lines can be suspended");
+    }
+
+    credit_line.status = CreditStatus::Suspended;
+    credit_line.suspension_ts = env.ledger().timestamp();
+    env.storage().persistent().set(&borrower, &credit_line);
+
+    publish_credit_line_event(
+        env,
+        (symbol_short!("credit"), symbol_short!("suspend")),
+        CreditLineEvent {
+            event_type: symbol_short!("suspend"),
+            borrower,
+            status: CreditStatus::Suspended,
+            credit_limit: credit_line.credit_limit,
+            interest_rate_bps: credit_line.interest_rate_bps,
+            risk_score: credit_line.risk_score,
+        },
+    );
+}
+
+/// Open a new credit line.
+///
+/// Creating a brand-new line preserves the existing backend/risk-engine trust
+/// boundary. Re-opening any existing non-Active line requires admin auth so a
+/// borrower cannot self-suspend and then reactivate themselves on-chain.
 pub fn open_credit_line(
     env: Env,
     borrower: Address,
@@ -10,14 +75,16 @@ pub fn open_credit_line(
     interest_rate_bps: u32,
     risk_score: u32,
 ) {
-    assert!(credit_limit > 0, "credit_limit must be greater than zero");
-    assert!(
-        interest_rate_bps <= 10_000,
-        "interest_rate_bps cannot exceed 10000 (100%)"
-    );
-    assert!(risk_score <= 100, "risk_score must be between 0 and 100");
+    assert_not_paused(&env);
 
-    // Prevent overwriting an existing Active credit line
+    assert!(credit_limit > 0, "credit_limit must be greater than zero");
+    if interest_rate_bps > MAX_INTEREST_RATE_BPS {
+        env.panic_with_error(ContractError::RateTooHigh);
+    }
+    if risk_score > MAX_RISK_SCORE {
+        env.panic_with_error(ContractError::ScoreTooHigh);
+    }
+
     if let Some(existing) = env
         .storage()
         .persistent()
@@ -27,7 +94,11 @@ pub fn open_credit_line(
             existing.status != CreditStatus::Active,
             "borrower already has an active credit line"
         );
+
+        // Prevent borrower-controlled status bypasses on existing lines.
+        require_admin_auth(&env);
     }
+
     let credit_line = CreditLineData {
         borrower: borrower.clone(),
         credit_limit,
@@ -37,9 +108,9 @@ pub fn open_credit_line(
         status: CreditStatus::Active,
         last_rate_update_ts: 0,
         accrued_interest: 0,
-        last_accrual_ts: 0,
+        last_accrual_ts: env.ledger().timestamp(),
+        suspension_ts: 0,
     };
-
     env.storage().persistent().set(&borrower, &credit_line);
 
     publish_credit_line_event(
@@ -47,7 +118,7 @@ pub fn open_credit_line(
         (symbol_short!("credit"), symbol_short!("opened")),
         CreditLineEvent {
             event_type: symbol_short!("opened"),
-            borrower: borrower.clone(),
+            borrower,
             status: CreditStatus::Active,
             credit_limit,
             interest_rate_bps,
@@ -58,8 +129,8 @@ pub fn open_credit_line(
 
 /// Suspend a credit line temporarily (admin only).
 ///
-/// Called by admin to freeze a borrower's credit line without closing it.
-/// The credit line can be reactivated or closed after suspension.
+/// # State transition
+/// `Active → Suspended`
 ///
 /// # Parameters
 /// - `borrower`: The borrower's address.
@@ -71,32 +142,20 @@ pub fn open_credit_line(
 /// # Events
 /// Emits a `("credit", "suspend")` [`CreditLineEvent`].
 pub fn suspend_credit_line(env: Env, borrower: Address) {
+    assert_not_paused(&env);
     require_admin_auth(&env);
-    let mut credit_line: CreditLineData = env
-        .storage()
-        .persistent()
-        .get(&borrower)
-        .expect("Credit line not found");
+    suspend_credit_line_internal(&env, borrower);
+}
 
-    if credit_line.status != CreditStatus::Active {
-        panic!("Only active credit lines can be suspended");
-    }
-
-    credit_line.status = CreditStatus::Suspended;
-    env.storage().persistent().set(&borrower, &credit_line);
-
-    publish_credit_line_event(
-        &env,
-        (symbol_short!("credit"), symbol_short!("suspend")),
-        CreditLineEvent {
-            event_type: symbol_short!("suspend"),
-            borrower: borrower.clone(),
-            status: CreditStatus::Suspended,
-            credit_limit: credit_line.credit_limit,
-            interest_rate_bps: credit_line.interest_rate_bps,
-            risk_score: credit_line.risk_score,
-        },
-    );
+/// Suspend the caller's own active credit line.
+///
+/// This is a borrower safety control that blocks future draws while leaving
+/// repayments available. Reactivation still requires a separate admin-controlled
+/// workflow.
+pub fn self_suspend_credit_line(env: Env, borrower: Address) {
+    assert_not_paused(&env);
+    borrower.require_auth();
+    suspend_credit_line_internal(&env, borrower);
 }
 
 /// Close a credit line permanently.
@@ -190,6 +249,8 @@ pub fn close_credit_line(env: Env, borrower: Address, closer: Address) {
     );
 }
 
+// ── default_credit_line ───────────────────────────────────────────────────────
+
 /// Mark a credit line as defaulted (admin only).
 ///
 /// Transition: `Active` or `Suspended` → `Defaulted`.
@@ -198,21 +259,38 @@ pub fn close_credit_line(env: Env, borrower: Address, closer: Address) {
 /// # Events
 /// Emits a `("credit", "default")` [`CreditLineEvent`].
 pub fn default_credit_line(env: Env, borrower: Address) {
+    assert_not_paused(&env);
     require_admin_auth(&env);
     let mut credit_line: CreditLineData = env
         .storage()
         .persistent()
         .get(&borrower)
-        .expect("Credit line not found");
+        .unwrap_or_else(|| env.panic_with_error(ContractError::CreditLineNotFound));
+
+    if credit_line.status == CreditStatus::Closed {
+        env.panic_with_error(ContractError::CreditLineClosed);
+    }
+
+    // Apply interest accrual before any mutation
+    credit_line = crate::accrual::apply_accrual(&env, credit_line);
+
+    if credit_line.status == CreditStatus::Closed {
+        panic!("cannot default a closed credit line");
+    }
+
+    if credit_line.status == CreditStatus::Defaulted {
+        // Idempotent: already defaulted, nothing to do.
+        return;
+    }
 
     credit_line.status = CreditStatus::Defaulted;
     env.storage().persistent().set(&borrower, &credit_line);
 
     publish_credit_line_event(
         &env,
-        (symbol_short!("credit"), symbol_short!("default")),
+        (symbol_short!("credit"), symbol_short!("defaulted")),
         CreditLineEvent {
-            event_type: symbol_short!("default"),
+            event_type: symbol_short!("defaulted"),
             borrower: borrower.clone(),
             status: CreditStatus::Defaulted,
             credit_limit: credit_line.credit_limit,
@@ -220,9 +298,99 @@ pub fn default_credit_line(env: Env, borrower: Address) {
             risk_score: credit_line.risk_score,
         },
     );
+
+    publish_default_liquidation_requested_event(
+        &env,
+        DefaultLiquidationRequestedEvent {
+            borrower,
+            utilized_amount: credit_line.utilized_amount,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
 }
 
-/// Reinstate a defaulted credit line to Active (admin only).
+/// Apply auction liquidation proceeds to a defaulted credit line (admin only).
+///
+/// This hook is accounting-only and intentionally performs no token transfer.
+/// Off-chain orchestration is responsible for ensuring auction proceeds are settled
+/// into protocol custody before this function is called.
+pub fn settle_default_liquidation(
+    env: Env,
+    borrower: Address,
+    recovered_amount: i128,
+    settlement_id: Symbol,
+) {
+    require_admin_auth(&env);
+
+    if recovered_amount <= 0 {
+        panic!("recovered amount must be positive");
+    }
+
+    let settlement_key = liquidation_settlement_key(&borrower, &settlement_id);
+    if env.storage().persistent().has(&settlement_key) {
+        panic!("liquidation settlement already applied");
+    }
+
+    let mut credit_line: CreditLineData = env
+        .storage()
+        .persistent()
+        .get(&borrower)
+        .expect("Credit line not found");
+
+    // Apply interest accrual before any mutation
+    credit_line = crate::accrual::apply_accrual(&env, credit_line);
+
+    if credit_line.status != CreditStatus::Defaulted {
+        panic!("credit line is not defaulted");
+    }
+
+    if recovered_amount > credit_line.utilized_amount {
+        panic!("recovered amount exceeds utilized amount");
+    }
+
+    credit_line.utilized_amount = credit_line
+        .utilized_amount
+        .checked_sub(recovered_amount)
+        .expect("overflow while applying liquidation settlement");
+
+    if credit_line.utilized_amount == 0 {
+        credit_line.status = CreditStatus::Closed;
+    }
+
+    env.storage().persistent().set(&borrower, &credit_line);
+    env.storage().persistent().set(&settlement_key, &true);
+
+    if credit_line.status == CreditStatus::Closed {
+        publish_credit_line_event(
+            &env,
+            (symbol_short!("credit"), symbol_short!("closed")),
+            CreditLineEvent {
+                event_type: symbol_short!("closed"),
+                borrower: borrower.clone(),
+                status: CreditStatus::Closed,
+                credit_limit: credit_line.credit_limit,
+                interest_rate_bps: credit_line.interest_rate_bps,
+                risk_score: credit_line.risk_score,
+            },
+        );
+    }
+
+    publish_default_liquidation_settled_event(
+        &env,
+        DefaultLiquidationSettledEvent {
+            borrower,
+            settlement_id,
+            recovered_amount,
+            remaining_utilized_amount: credit_line.utilized_amount,
+            status: credit_line.status,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+}
+
+// ── reinstate_credit_line ─────────────────────────────────────────────────────
+
+/// Reinstate a `Defaulted` credit line to either `Active` or `Suspended` (admin only).
 ///
 /// Allowed only when current status is `Defaulted`. Transition: `Defaulted` → `Active`.
 ///
@@ -233,28 +401,40 @@ pub fn default_credit_line(env: Env, borrower: Address) {
 /// # Events
 /// Emits a `("credit", "reinstate")` [`CreditLineEvent`].
 pub fn reinstate_credit_line(env: Env, borrower: Address) {
+    assert_not_paused(&env);
     require_admin_auth(&env);
 
+    // ── Validate target status early (fail fast before storage read) ──────────
+    if target_status != CreditStatus::Active && target_status != CreditStatus::Suspended {
+        panic!("invalid target status: must be Active or Suspended");
+    }
+
+    // ── Load credit line ───────────────────────────────────────────────────────
     let mut credit_line: CreditLineData = env
         .storage()
         .persistent()
         .get(&borrower)
-        .expect("Credit line not found");
+        .unwrap_or_else(|| env.panic_with_error(ContractError::CreditLineNotFound));
+
+    // Apply interest accrual before any mutation
+    credit_line = crate::accrual::apply_accrual(&env, credit_line);
 
     if credit_line.status != CreditStatus::Defaulted {
         panic!("credit line is not defaulted");
     }
 
     credit_line.status = CreditStatus::Active;
+    credit_line.suspension_ts = 0; // clear grace period anchor on reinstatement
     env.storage().persistent().set(&borrower, &credit_line);
 
+    // ── Emit event ─────────────────────────────────────────────────────────────
     publish_credit_line_event(
         &env,
         (symbol_short!("credit"), symbol_short!("reinstate")),
         CreditLineEvent {
             event_type: symbol_short!("reinstate"),
             borrower: borrower.clone(),
-            status: CreditStatus::Active,
+            status: target_status,
             credit_limit: credit_line.credit_limit,
             interest_rate_bps: credit_line.interest_rate_bps,
             risk_score: credit_line.risk_score,
