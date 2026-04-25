@@ -23,26 +23,6 @@ fn setup(env: &Env) -> (CreditClient<'_>, Address, Address, Address) {
     (client, contract_id, admin, borrower)
 }
 
-fn admin_suspend(
-    env: &Env,
-    client: &CreditClient,
-    admin: &Address,
-    contract_id: &Address,
-    borrower: &Address,
-) {
-    client
-        .mock_auths(&[MockAuth {
-            address: admin,
-            invoke: &MockAuthInvoke {
-                contract: contract_id,
-                fn_name: "suspend_credit_line",
-                args: (borrower,).into_val(env),
-                sub_invokes: &[],
-            },
-        }])
-        .suspend_credit_line(borrower);
-}
-
 fn admin_default(
     env: &Env,
     client: &CreditClient,

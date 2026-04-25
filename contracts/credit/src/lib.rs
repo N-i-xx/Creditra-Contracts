@@ -22,20 +22,19 @@ mod boundary_tests;
 #[cfg(test)]
 mod risk_formula_tests;
 
-use crate::auth::{require_admin, require_admin_auth};
+use crate::auth::require_admin_auth;
 use crate::events::{
     publish_admin_rotation_accepted, publish_admin_rotation_proposed, publish_drawn_event,
     publish_interest_accrued_event, publish_paused_event, publish_rate_formula_config_event,
-    publish_repayment_event, AdminRotationAcceptedEvent, AdminRotationProposedEvent, DrawnEvent,
-    InterestAccruedEvent, PausedEvent, RateFormulaConfigEvent, RepaymentEvent,
+    publish_repayment_event, DrawnEvent, InterestAccruedEvent, RepaymentEvent,
 };
 use crate::storage::{
     admin_key, assert_not_paused, clear_reentrancy_guard, proposed_admin_key, proposed_at_key,
     rate_cfg_key, rate_formula_key, set_reentrancy_guard, DataKey,
 };
 use crate::types::{
-    ContractError, ContractVersion, CreditLineData, CreditStatus, GracePeriodConfig,
-    GraceWaiverMode, RateChangeConfig, RateFormulaConfig,
+    ContractError, CreditLineData, CreditStatus, GracePeriodConfig, GraceWaiverMode,
+    RateChangeConfig, RateFormulaConfig,
 };
 use soroban_sdk::{contract, contractimpl, token, Address, Env, Symbol};
 
@@ -44,6 +43,7 @@ pub const CONTRACT_API_VERSION: (u32, u32, u32) = (1, 0, 0);
 #[allow(dead_code)]
 const SECONDS_PER_YEAR: u64 = 31_536_000;
 
+#[allow(dead_code)]
 const SCHEMA_VERSION: u32 = 1;
 
 #[contract]
@@ -56,7 +56,7 @@ impl Credit {
     }
 
     pub fn propose_admin(env: Env, new_admin: Address, delay_seconds: u64) {
-        let current_admin = require_admin_auth(&env);
+        require_admin_auth(&env);
         let accept_after = env.ledger().timestamp().saturating_add(delay_seconds);
 
         env.storage()
@@ -66,14 +66,7 @@ impl Credit {
             .instance()
             .set(&proposed_at_key(&env), &accept_after);
 
-        publish_admin_rotation_proposed(
-            &env,
-            AdminRotationProposedEvent {
-                current_admin,
-                proposed_admin: new_admin,
-                accept_after,
-            },
-        );
+        publish_admin_rotation_proposed(&env, &new_admin, accept_after);
     }
 
     pub fn accept_admin(env: Env) {
@@ -93,23 +86,17 @@ impl Credit {
             env.panic_with_error(ContractError::AdminAcceptTooEarly);
         }
 
-        let previous_admin = require_admin(&env);
         env.storage()
             .instance()
             .set(&admin_key(&env), &proposed_admin);
         env.storage().instance().remove(&proposed_admin_key(&env));
         env.storage().instance().remove(&proposed_at_key(&env));
 
-        publish_admin_rotation_accepted(
-            &env,
-            AdminRotationAcceptedEvent {
-                previous_admin,
-                new_admin: proposed_admin,
-            },
-        );
+        publish_admin_rotation_accepted(&env, &proposed_admin);
     }
 
     pub fn set_liquidity_token(env: Env, token_address: Address) {
+        assert_not_paused(&env);
         require_admin_auth(&env);
         env.storage()
             .instance()
@@ -117,6 +104,7 @@ impl Credit {
     }
 
     pub fn set_liquidity_source(env: Env, reserve_address: Address) {
+        assert_not_paused(&env);
         require_admin_auth(&env);
         env.storage()
             .instance()
@@ -211,8 +199,7 @@ impl Credit {
             env.panic_with_error(ContractError::OverLimit);
         }
 
-        let maybe_token: Option<Address> =
-            env.storage().instance().get(&DataKey::LiquidityToken);
+        let maybe_token: Option<Address> = env.storage().instance().get(&DataKey::LiquidityToken);
         if let Some(token_address) = maybe_token {
             let reserve_address: Address = env
                 .storage()
@@ -232,14 +219,13 @@ impl Credit {
         credit_line.utilized_amount = updated_utilized;
         env.storage().persistent().set(&borrower, &credit_line);
 
-        let timestamp = env.ledger().timestamp();
+        let _timestamp = env.ledger().timestamp();
         publish_drawn_event(
             &env,
             DrawnEvent {
                 borrower,
                 amount,
                 new_utilized_amount: updated_utilized,
-                timestamp,
             },
         );
         clear_reentrancy_guard(&env);
@@ -299,7 +285,7 @@ impl Credit {
         }
 
         let interest_repaid = effective_repay.min(credit_line.accrued_interest);
-        let principal_repaid = effective_repay - interest_repaid;
+        let _principal_repaid = effective_repay - interest_repaid;
         credit_line.accrued_interest = credit_line
             .accrued_interest
             .checked_sub(interest_repaid)
@@ -313,15 +299,13 @@ impl Credit {
 
         env.storage().persistent().set(&borrower, &credit_line);
 
-        let timestamp = env.ledger().timestamp();
+        let _timestamp = env.ledger().timestamp();
         publish_interest_accrued_event(
             &env,
             InterestAccruedEvent {
                 borrower: borrower.clone(),
                 accrued_amount: 0,
-                total_accrued_interest: credit_line.accrued_interest,
                 new_utilized_amount: new_utilized,
-                timestamp,
             },
         );
         publish_repayment_event(
@@ -329,11 +313,7 @@ impl Credit {
             RepaymentEvent {
                 borrower: borrower.clone(),
                 amount: effective_repay,
-                interest_repaid,
-                principal_repaid,
                 new_utilized_amount: new_utilized,
-                new_accrued_interest: credit_line.accrued_interest,
-                timestamp,
             },
         );
 
@@ -453,16 +433,9 @@ impl Credit {
     }
 
     pub fn set_protocol_paused(env: Env, paused: bool) {
-        let admin = require_admin_auth(&env);
+        require_admin_auth(&env);
         storage::set_paused(&env, paused);
-        publish_paused_event(
-            &env,
-            PausedEvent {
-                paused,
-                timestamp: env.ledger().timestamp(),
-                actor: admin,
-            },
-        );
+        publish_paused_event(&env, paused);
     }
 
     pub fn is_protocol_paused(env: Env) -> bool {
@@ -495,10 +468,8 @@ impl Credit {
             min_rate_bps,
             max_rate_bps,
         };
-        env.storage()
-            .instance()
-            .set(&rate_formula_key(&env), &cfg);
-        publish_rate_formula_config_event(&env, RateFormulaConfigEvent { enabled: true });
+        env.storage().instance().set(&rate_formula_key(&env), &cfg);
+        publish_rate_formula_config_event(&env, true);
     }
 
     pub fn get_rate_formula_config(env: Env) -> Option<RateFormulaConfig> {
@@ -508,14 +479,10 @@ impl Credit {
     pub fn clear_rate_formula_config(env: Env) {
         require_admin_auth(&env);
         env.storage().instance().remove(&rate_formula_key(&env));
-        publish_rate_formula_config_event(&env, RateFormulaConfigEvent { enabled: false });
+        publish_rate_formula_config_event(&env, false);
     }
 
-    pub fn get_contract_version(_env: Env) -> ContractVersion {
-        ContractVersion {
-            major: CONTRACT_API_VERSION.0,
-            minor: CONTRACT_API_VERSION.1,
-            patch: CONTRACT_API_VERSION.2,
-        }
+    pub fn get_contract_version(_env: Env) -> (u32, u32, u32) {
+        CONTRACT_API_VERSION
     }
 }

@@ -10,9 +10,9 @@
 //! - Read-only operations work when paused
 //! - Events are emitted on pause/unpause
 
-use creditra_credit::types::{ContractError, CreditStatus};
+use creditra_credit::types::CreditStatus;
 use creditra_credit::{Credit, CreditClient};
-use soroban_sdk::testutils::{Address as _, Events, Ledger};
+use soroban_sdk::testutils::{Address as _, Events};
 use soroban_sdk::{token, Address, Env, Symbol, TryFromVal};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ fn non_admin_cannot_pause() {
 
 #[test]
 fn pause_emits_event() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let client = CreditClient::new(&env, &contract_id);
 
     let _ = env.events().all(); // clear setup events
@@ -187,10 +187,7 @@ fn suspend_credit_line_blocked_when_paused() {
         client.suspend_credit_line(&borrower);
     }));
 
-    assert!(
-        result.is_err(),
-        "suspend_credit_line must fail when paused"
-    );
+    assert!(result.is_err(), "suspend_credit_line must fail when paused");
 }
 
 #[test]
@@ -222,10 +219,7 @@ fn default_credit_line_blocked_when_paused() {
         client.default_credit_line(&borrower);
     }));
 
-    assert!(
-        result.is_err(),
-        "default_credit_line must fail when paused"
-    );
+    assert!(result.is_err(), "default_credit_line must fail when paused");
 }
 
 #[test]
@@ -260,10 +254,7 @@ fn set_liquidity_token_blocked_when_paused() {
         client.set_liquidity_token(&token);
     }));
 
-    assert!(
-        result.is_err(),
-        "set_liquidity_token must fail when paused"
-    );
+    assert!(result.is_err(), "set_liquidity_token must fail when paused");
 }
 
 #[test]
@@ -312,10 +303,7 @@ fn set_max_draw_amount_blocked_when_paused() {
         client.set_max_draw_amount(&10_000);
     }));
 
-    assert!(
-        result.is_err(),
-        "set_max_draw_amount must fail when paused"
-    );
+    assert!(result.is_err(), "set_max_draw_amount must fail when paused");
 }
 
 // ── repay_credit exception (critical safety feature) ─────────────────────────
@@ -347,7 +335,10 @@ fn repay_credit_works_when_paused() {
     client.repay_credit(&borrower, &200);
 
     let after = client.get_credit_line(&borrower).unwrap();
-    assert_eq!(after.utilized_amount, 300, "repayment must succeed when paused");
+    assert_eq!(
+        after.utilized_amount, 300,
+        "repayment must succeed when paused"
+    );
 }
 
 #[test]
@@ -372,7 +363,10 @@ fn repay_credit_full_repayment_when_paused() {
     client.repay_credit(&borrower, &800);
 
     let after = client.get_credit_line(&borrower).unwrap();
-    assert_eq!(after.utilized_amount, 0, "full repayment must work when paused");
+    assert_eq!(
+        after.utilized_amount, 0,
+        "full repayment must work when paused"
+    );
 }
 
 // ── read-only operations work when paused ────────────────────────────────────
@@ -415,7 +409,10 @@ fn get_rate_change_limits_works_when_paused() {
     client.set_protocol_paused(&true);
 
     let limits = client.get_rate_change_limits();
-    assert!(limits.is_some(), "get_rate_change_limits must work when paused");
+    assert!(
+        limits.is_some(),
+        "get_rate_change_limits must work when paused"
+    );
 }
 
 #[test]

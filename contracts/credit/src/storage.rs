@@ -95,6 +95,7 @@ pub fn clear_reentrancy_guard(env: &Env) {
 /// - **Key**: `DataKey::BlockedBorrower(borrower)`
 /// - **TTL Note**: Each borrower's block status has its own TTL, independent
 ///   of their credit line data. TTL should be extended on access.
+#[allow(dead_code)]
 pub fn is_borrower_blocked(env: &Env, borrower: &Address) -> bool {
     env.storage()
         .persistent()

@@ -190,17 +190,6 @@ pub struct RateFormulaConfig {
 }
 
 /// Structured representation of the contract's API version (semver).
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ContractVersion {
-    /// Incremented on breaking ABI or storage layout changes.
-    pub major: u32,
-    /// Incremented on backward-compatible feature additions.
-    pub minor: u32,
-    /// Incremented on backward-compatible bug fixes.
-    pub patch: u32,
-}
-
 /// Grace period waiver mode for suspended credit lines.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

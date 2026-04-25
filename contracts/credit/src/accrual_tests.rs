@@ -2,7 +2,6 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::types::CreditStatus;
     use crate::Credit;
     use crate::CreditClient;
     use soroban_sdk::{
@@ -199,10 +198,13 @@ mod tests {
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod grace_period_tests {
-    use crate::types::{CreditStatus, GracePeriodConfig, GraceWaiverMode};
+    use crate::types::{CreditStatus, GraceWaiverMode};
     use crate::Credit;
     use crate::CreditClient;
-    use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        Address, Env,
+    };
 
     /// Helper: deploy contract, init admin, open a credit line, draw, then suspend.
     /// Returns (env, client, contract_id, borrower).
@@ -242,8 +244,7 @@ mod grace_period_tests {
         // 1000 bps = 10% annual; principal = 100_000
         // Draw at t=1, suspend at t=1. Advance to t=1+31_536_000.
         // Elapsed = 31_536_000 s → interest = 10_000
-        let (client, _contract_id, borrower) =
-            setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
+        let (client, _contract_id, borrower) = setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
 
         env.ledger().set_timestamp(1 + 31_536_000);
         client.update_risk_parameters(&borrower, &1_000_000, &1000, &50);
@@ -260,8 +261,7 @@ mod grace_period_tests {
     fn full_waiver_no_interest_inside_grace_window() {
         let env = Env::default();
         // Suspend at t=1; grace window = 1 year.
-        let (client, _contract_id, borrower) =
-            setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
+        let (client, _contract_id, borrower) = setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
 
         client.set_grace_period_config(&31_536_000_u64, &GraceWaiverMode::FullWaiver, &0_u32);
 
@@ -279,8 +279,7 @@ mod grace_period_tests {
     #[test]
     fn full_waiver_no_interest_at_grace_boundary() {
         let env = Env::default();
-        let (client, _contract_id, borrower) =
-            setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
+        let (client, _contract_id, borrower) = setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
 
         client.set_grace_period_config(&31_536_000_u64, &GraceWaiverMode::FullWaiver, &0_u32);
 
@@ -300,8 +299,7 @@ mod grace_period_tests {
     fn full_waiver_full_rate_resumes_after_grace_window() {
         let env = Env::default();
         // Suspend at t=1; grace = 1 year. grace_end = 1 + 31_536_000 = 31_536_001.
-        let (client, _contract_id, borrower) =
-            setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
+        let (client, _contract_id, borrower) = setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
 
         client.set_grace_period_config(&31_536_000_u64, &GraceWaiverMode::FullWaiver, &0_u32);
 
@@ -324,8 +322,7 @@ mod grace_period_tests {
         let env = Env::default();
         // Full rate = 1000 bps (10%); reduced rate = 200 bps (2%).
         // Suspend at t=1; grace = 1 year. grace_end = 31_536_001.
-        let (client, _contract_id, borrower) =
-            setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
+        let (client, _contract_id, borrower) = setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
 
         client.set_grace_period_config(&31_536_000_u64, &GraceWaiverMode::ReducedRate, &200_u32);
 
@@ -348,8 +345,7 @@ mod grace_period_tests {
     fn full_waiver_split_window_straddles_grace_boundary() {
         let env = Env::default();
         // Suspend at t=1; grace = 1 year. grace_end = 31_536_001.
-        let (client, _contract_id, borrower) =
-            setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
+        let (client, _contract_id, borrower) = setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
 
         client.set_grace_period_config(&31_536_000_u64, &GraceWaiverMode::FullWaiver, &0_u32);
 
@@ -370,8 +366,7 @@ mod grace_period_tests {
         let env = Env::default();
         // Full rate = 1000 bps; reduced = 200 bps; grace = 1 year.
         // Suspend at t=1; grace_end = 31_536_001.
-        let (client, _contract_id, borrower) =
-            setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
+        let (client, _contract_id, borrower) = setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
 
         client.set_grace_period_config(&31_536_000_u64, &GraceWaiverMode::ReducedRate, &200_u32);
 
@@ -393,8 +388,7 @@ mod grace_period_tests {
     #[test]
     fn zero_grace_period_seconds_disables_waiver() {
         let env = Env::default();
-        let (client, _contract_id, borrower) =
-            setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
+        let (client, _contract_id, borrower) = setup_suspended(&env, 1_000_000, 100_000, 1000, 1);
 
         // Set config but with 0 seconds — effectively disabled.
         client.set_grace_period_config(&0_u64, &GraceWaiverMode::FullWaiver, &0_u32);
@@ -511,8 +505,7 @@ mod grace_period_tests {
     fn default_during_grace_ends_grace_period() {
         let env = Env::default();
         // Suspend at t=0; grace = 1 year.
-        let (client, _contract_id, borrower) =
-            setup_suspended(&env, 1_000_000, 100_000, 1000, 0);
+        let (client, _contract_id, borrower) = setup_suspended(&env, 1_000_000, 100_000, 1000, 0);
 
         client.set_grace_period_config(&31_536_000_u64, &GraceWaiverMode::FullWaiver, &0_u32);
 
@@ -537,8 +530,7 @@ mod grace_period_tests {
     #[test]
     fn suspension_ts_cleared_on_reinstatement() {
         let env = Env::default();
-        let (client, _contract_id, borrower) =
-            setup_suspended(&env, 1_000_000, 100_000, 1000, 100);
+        let (client, _contract_id, borrower) = setup_suspended(&env, 1_000_000, 100_000, 1000, 100);
 
         // Default then reinstate.
         env.ledger().set_timestamp(200);

@@ -10,7 +10,7 @@
 //! These are global singleton values — one config per contract deployment.
 
 use crate::auth::require_admin_auth;
-use crate::events::{publish_risk_parameters_updated, RiskParametersUpdatedEvent};
+use crate::events::publish_risk_parameters_updated;
 use crate::storage::{assert_not_paused, rate_cfg_key, rate_formula_key};
 use crate::types::{CreditLineData, RateChangeConfig, RateFormulaConfig};
 use soroban_sdk::{Address, Env};
@@ -46,7 +46,6 @@ pub fn compute_rate_from_score(cfg: &RateFormulaConfig, risk_score: u32) -> u32 
     let upper = cfg.max_rate_bps.min(MAX_INTEREST_RATE_BPS);
     raw.clamp(cfg.min_rate_bps, upper)
 }
-
 
 /// Set optional global rate-change caps (admin only).
 pub fn set_rate_change_limits(env: Env, max_rate_change_bps: u32, rate_change_min_interval: u64) {
@@ -154,15 +153,7 @@ pub fn update_risk_parameters(
     credit_line.risk_score = risk_score;
     env.storage().persistent().set(&borrower, &credit_line);
 
-    publish_risk_parameters_updated(
-        &env,
-        RiskParametersUpdatedEvent {
-            borrower: borrower.clone(),
-            credit_limit,
-            interest_rate_bps: effective_rate,
-            risk_score,
-        },
-    );
+    publish_risk_parameters_updated(&env, &borrower, credit_limit, effective_rate, risk_score);
 }
 
 /// Retrieve the rate formula configuration from instance storage, if set.

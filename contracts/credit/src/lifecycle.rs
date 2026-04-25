@@ -13,8 +13,7 @@
 use crate::auth::{require_admin, require_admin_auth};
 use crate::events::{
     publish_credit_line_event, publish_default_liquidation_requested_event,
-    publish_default_liquidation_settled_event, CreditLineEvent,
-    DefaultLiquidationRequestedEvent, DefaultLiquidationSettledEvent,
+    publish_default_liquidation_settled_event, CreditLineEvent, DefaultLiquidationSettledEvent,
 };
 use crate::risk::{MAX_INTEREST_RATE_BPS, MAX_RISK_SCORE};
 use crate::storage::assert_not_paused;
@@ -27,7 +26,10 @@ use soroban_sdk::{symbol_short, Address, Env, Symbol};
 /// - **Type**: Persistent storage (independent TTL per settlement)
 /// - **Key**: `(Symbol("liq_seen"), borrower, settlement_id)`
 /// - **Purpose**: Prevents replay of the same liquidation settlement
-fn liquidation_settlement_key(borrower: &Address, settlement_id: &Symbol) -> (Symbol, Address, Symbol) {
+fn liquidation_settlement_key(
+    borrower: &Address,
+    settlement_id: &Symbol,
+) -> (Symbol, Address, Symbol) {
     (
         symbol_short!("liq_seen"),
         borrower.clone(),
@@ -57,7 +59,6 @@ fn suspend_credit_line_internal(env: &Env, borrower: Address) {
         env,
         (symbol_short!("credit"), symbol_short!("suspend")),
         CreditLineEvent {
-            event_type: symbol_short!("suspend"),
             borrower,
             status: CreditStatus::Suspended,
             credit_limit: credit_line.credit_limit,
@@ -121,7 +122,6 @@ pub fn open_credit_line(
         &env,
         (symbol_short!("credit"), symbol_short!("opened")),
         CreditLineEvent {
-            event_type: symbol_short!("opened"),
             borrower,
             status: CreditStatus::Active,
             credit_limit,
@@ -214,7 +214,6 @@ pub fn close_credit_line(env: Env, borrower: Address, closer: Address) {
         &env,
         (symbol_short!("credit"), symbol_short!("closed")),
         CreditLineEvent {
-            event_type: symbol_short!("closed"),
             borrower: borrower.clone(),
             status: CreditStatus::Closed,
             credit_limit: credit_line.credit_limit,
@@ -280,7 +279,6 @@ pub fn default_credit_line(env: Env, borrower: Address) {
         &env,
         (symbol_short!("credit"), symbol_short!("defaulted")),
         CreditLineEvent {
-            event_type: symbol_short!("defaulted"),
             borrower: borrower.clone(),
             status: CreditStatus::Defaulted,
             credit_limit: credit_line.credit_limit,
@@ -289,14 +287,7 @@ pub fn default_credit_line(env: Env, borrower: Address) {
         },
     );
 
-    publish_default_liquidation_requested_event(
-        &env,
-        DefaultLiquidationRequestedEvent {
-            borrower,
-            utilized_amount: credit_line.utilized_amount,
-            timestamp: env.ledger().timestamp(),
-        },
-    );
+    publish_default_liquidation_requested_event(&env, &borrower, credit_line.utilized_amount);
 }
 
 /// Apply auction liquidation proceeds to a defaulted credit line (admin only).
@@ -355,7 +346,6 @@ pub fn settle_default_liquidation(
             &env,
             (symbol_short!("credit"), symbol_short!("closed")),
             CreditLineEvent {
-                event_type: symbol_short!("closed"),
                 borrower: borrower.clone(),
                 status: CreditStatus::Closed,
                 credit_limit: credit_line.credit_limit,
@@ -373,7 +363,6 @@ pub fn settle_default_liquidation(
             recovered_amount,
             remaining_utilized_amount: credit_line.utilized_amount,
             status: credit_line.status,
-            timestamp: env.ledger().timestamp(),
         },
     );
 }
@@ -406,7 +395,7 @@ pub fn reinstate_credit_line(env: Env, borrower: Address, target_status: CreditS
         panic!("credit line is not defaulted");
     }
 
-    credit_line.status = target_status.clone();
+    credit_line.status = target_status;
     credit_line.suspension_ts = 0;
     env.storage().persistent().set(&borrower, &credit_line);
 
@@ -414,7 +403,6 @@ pub fn reinstate_credit_line(env: Env, borrower: Address, target_status: CreditS
         &env,
         (symbol_short!("credit"), symbol_short!("reinstate")),
         CreditLineEvent {
-            event_type: symbol_short!("reinstate"),
             borrower: borrower.clone(),
             status: target_status,
             credit_limit: credit_line.credit_limit,
@@ -507,8 +495,7 @@ mod tests_reinstate {
         client.init(&admin);
 
         // Use a token so we can draw
-        let token_id =
-            env.register_stellar_asset_contract_v2(soroban_sdk::Address::generate(&env));
+        let token_id = env.register_stellar_asset_contract_v2(soroban_sdk::Address::generate(&env));
         client.set_liquidity_token(&token_id.address());
         soroban_sdk::token::StellarAssetClient::new(&env, &token_id.address())
             .mint(&contract_id, &1_000_i128);
@@ -546,8 +533,7 @@ mod tests_reinstate {
         let client = CreditClient::new(&env, &contract_id);
         client.init(&admin);
 
-        let token_id =
-            env.register_stellar_asset_contract_v2(soroban_sdk::Address::generate(&env));
+        let token_id = env.register_stellar_asset_contract_v2(soroban_sdk::Address::generate(&env));
         client.set_liquidity_token(&token_id.address());
         soroban_sdk::token::StellarAssetClient::new(&env, &token_id.address())
             .mint(&contract_id, &1_000_i128);
@@ -568,7 +554,7 @@ mod tests_reinstate {
     // ── 5. Reinstated-to-Suspended blocks draws ───────────────────────────────
 
     #[test]
-    #[should_panic(expected = "credit line is suspended")]
+    #[should_panic(expected = "Error(Contract, #20)")]
     fn reinstate_to_suspended_blocks_draw() {
         let env = Env::default();
         env.mock_all_auths();
@@ -578,8 +564,7 @@ mod tests_reinstate {
         let client = CreditClient::new(&env, &contract_id);
         client.init(&admin);
 
-        let token_id =
-            env.register_stellar_asset_contract_v2(soroban_sdk::Address::generate(&env));
+        let token_id = env.register_stellar_asset_contract_v2(soroban_sdk::Address::generate(&env));
         client.set_liquidity_token(&token_id.address());
         soroban_sdk::token::StellarAssetClient::new(&env, &token_id.address())
             .mint(&contract_id, &1_000_i128);
@@ -604,8 +589,7 @@ mod tests_reinstate {
         let client = CreditClient::new(&env, &contract_id);
         client.init(&admin);
 
-        let token_id =
-            env.register_stellar_asset_contract_v2(soroban_sdk::Address::generate(&env));
+        let token_id = env.register_stellar_asset_contract_v2(soroban_sdk::Address::generate(&env));
         let token_address = token_id.address();
         client.set_liquidity_token(&token_address);
         soroban_sdk::token::StellarAssetClient::new(&env, &token_address)
@@ -722,7 +706,6 @@ mod tests_reinstate {
         let event: CreditLineEvent = data.try_into_val(&env).unwrap();
         assert_eq!(event.status, CreditStatus::Active);
         assert_eq!(event.borrower, borrower);
-        assert_eq!(event.event_type, symbol_short!("reinstate"));
     }
 
     #[test]
@@ -769,8 +752,7 @@ mod tests_reinstate {
         let client = CreditClient::new(&env, &contract_id);
         client.init(&admin);
 
-        let token_id =
-            env.register_stellar_asset_contract_v2(soroban_sdk::Address::generate(&env));
+        let token_id = env.register_stellar_asset_contract_v2(soroban_sdk::Address::generate(&env));
         client.set_liquidity_token(&token_id.address());
         soroban_sdk::token::StellarAssetClient::new(&env, &token_id.address())
             .mint(&contract_id, &1_000_i128);
