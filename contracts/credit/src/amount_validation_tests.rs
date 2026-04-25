@@ -108,8 +108,7 @@ fn draw_credit_rejects_invalid_amounts() {
 
     for case in &cases {
         let env = Env::default();
-        let (client, _token, _contract, _admin, borrower) =
-            setup_with_token(&env, 10_000_i128);
+        let (client, _token, _contract, _admin, borrower) = setup_with_token(&env, 10_000_i128);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.draw_credit(&borrower, &case.amount);
@@ -128,14 +127,16 @@ fn draw_credit_rejects_invalid_amounts() {
 #[test]
 fn draw_credit_accepts_minimal_positive_amount() {
     let env = Env::default();
-    let (client, _token, _contract, _admin, borrower) =
-        setup_with_token(&env, 10_000_i128);
+    let (client, _token, _contract, _admin, borrower) = setup_with_token(&env, 10_000_i128);
 
     // Should not panic.
     client.draw_credit(&borrower, &1_i128);
 
     let line = client.get_credit_line(&borrower).expect("line must exist");
-    assert_eq!(line.utilized_amount, 1, "utilized_amount should be 1 after minimal draw");
+    assert_eq!(
+        line.utilized_amount, 1,
+        "utilized_amount should be 1 after minimal draw"
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -320,17 +321,53 @@ fn amount_rejection_matrix_all_entrypoints() {
 
     let matrix = [
         // --- draw_credit ---
-        MatrixRow { entrypoint: Entrypoint::DrawCredit, description: "draw zero",       amount: 0 },
-        MatrixRow { entrypoint: Entrypoint::DrawCredit, description: "draw -1",         amount: -1 },
-        MatrixRow { entrypoint: Entrypoint::DrawCredit, description: "draw i128::MIN",  amount: i128::MIN },
+        MatrixRow {
+            entrypoint: Entrypoint::DrawCredit,
+            description: "draw zero",
+            amount: 0,
+        },
+        MatrixRow {
+            entrypoint: Entrypoint::DrawCredit,
+            description: "draw -1",
+            amount: -1,
+        },
+        MatrixRow {
+            entrypoint: Entrypoint::DrawCredit,
+            description: "draw i128::MIN",
+            amount: i128::MIN,
+        },
         // --- repay_credit ---
-        MatrixRow { entrypoint: Entrypoint::RepayCredit, description: "repay zero",      amount: 0 },
-        MatrixRow { entrypoint: Entrypoint::RepayCredit, description: "repay -1",        amount: -1 },
-        MatrixRow { entrypoint: Entrypoint::RepayCredit, description: "repay i128::MIN", amount: i128::MIN },
+        MatrixRow {
+            entrypoint: Entrypoint::RepayCredit,
+            description: "repay zero",
+            amount: 0,
+        },
+        MatrixRow {
+            entrypoint: Entrypoint::RepayCredit,
+            description: "repay -1",
+            amount: -1,
+        },
+        MatrixRow {
+            entrypoint: Entrypoint::RepayCredit,
+            description: "repay i128::MIN",
+            amount: i128::MIN,
+        },
         // --- open_credit_line (credit_limit) ---
-        MatrixRow { entrypoint: Entrypoint::OpenCreditLine, description: "open limit 0",        amount: 0 },
-        MatrixRow { entrypoint: Entrypoint::OpenCreditLine, description: "open limit -1",       amount: -1 },
-        MatrixRow { entrypoint: Entrypoint::OpenCreditLine, description: "open limit i128::MIN", amount: i128::MIN },
+        MatrixRow {
+            entrypoint: Entrypoint::OpenCreditLine,
+            description: "open limit 0",
+            amount: 0,
+        },
+        MatrixRow {
+            entrypoint: Entrypoint::OpenCreditLine,
+            description: "open limit -1",
+            amount: -1,
+        },
+        MatrixRow {
+            entrypoint: Entrypoint::OpenCreditLine,
+            description: "open limit i128::MIN",
+            amount: i128::MIN,
+        },
     ];
 
     for row in &matrix {
@@ -350,8 +387,7 @@ fn amount_rejection_matrix_all_entrypoints() {
                     Entrypoint::RepayCredit => {
                         // Draw first so there is debt.
                         client.draw_credit(&borrower, &1_000_i128);
-                        StellarAssetClient::new(&env, &token_address)
-                            .mint(&borrower, &5_000_i128);
+                        StellarAssetClient::new(&env, &token_address).mint(&borrower, &5_000_i128);
                         soroban_sdk::token::Client::new(&env, &token_address).approve(
                             &borrower,
                             &contract_id,
