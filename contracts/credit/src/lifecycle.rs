@@ -77,7 +77,9 @@ pub fn open_credit_line(
 ) {
     assert_not_paused(&env);
 
-    assert!(credit_limit > 0, "credit_limit must be greater than zero");
+    if credit_limit <= 0 {
+        env.panic_with_error(ContractError::InvalidAmount);
+    }
     if interest_rate_bps > MAX_INTEREST_RATE_BPS {
         env.panic_with_error(ContractError::RateTooHigh);
     }
