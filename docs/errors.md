@@ -42,10 +42,12 @@ Rules enforced by CI (`tests/error_discriminants.rs`):
 | `12` | `Overflow`                       | An arithmetic operation (e.g., `checked_add` on `utilized_amount`) would overflow `i128`. | Amounts near `i128::MAX` are not supported. Reduce the draw or limit value. |
 | `13` | `LimitDecreaseRequiresRepayment` | A limit decrease was requested that would push `credit_limit` below `utilized_amount`. The line transitions to `Restricted` status. | Borrower must repay the excess (`utilized_amount - new_limit`) before the limit can be lowered further. |
 | `14` | `AlreadyInitialized`             | `init` was called on a contract that already has an admin stored. | `init` is a one-time operation. Do not call it again after deployment. |
-| `15` | `AdminAcceptTooEarly`            | `accept_admin` was called before the `delay_seconds` window set in `propose_admin` has elapsed. | Wait until `env.ledger().timestamp() >= accept_after` and retry. |
-| `16` | `BorrowerBlocked`                | The borrower address is on the admin-managed block list; draws are disabled. | Contact the protocol admin to remove the block, or use a different borrower address. |
-| `17` | `DrawExceedsMaxAmount`           | The requested draw amount exceeds the per-transaction cap set via `set_max_draw_amount`. | Split the draw into smaller transactions or request a cap increase from the admin. |
-| `18` | `Paused`                         | The protocol is paused via the emergency circuit breaker; operation is blocked. | Wait for the admin to unpause the protocol via `set_protocol_paused(false)`. `repay_credit` remains active during a pause. |
+| `15` | `DrawsFrozen`                    | All draws are globally frozen by admin for liquidity reserve operations. | Wait for the admin to unfreeze draws via `unfreeze_draws`. |
+| `16` | `DrawExceedsMaxAmount`           | The requested draw amount exceeds the per-transaction cap set via `set_max_draw_amount`. | Split the draw into smaller transactions or request a cap increase from the admin. |
+| `17` | `BorrowerBlocked`                | The borrower address is on the admin-managed block list; draws are disabled. | Contact the protocol admin to remove the block, or use a different borrower address. |
+| `18` | `AdminAcceptTooEarly`            | `accept_admin` was called before the `delay_seconds` window set in `propose_admin` has elapsed. | Wait until `env.ledger().timestamp() >= accept_after` and retry. |
+| `19` | `Paused`                         | The protocol is paused via the emergency circuit breaker; operation is blocked. | Wait for the admin to unpause the protocol via `set_protocol_paused(false)`. `repay_credit` remains active during a pause. |
+| `20` | `DrawCooldownActive`             | The borrower attempted to draw again before the configured cooldown interval elapsed. | Wait the configured interval and retry, or ask admin to disable the cooldown by setting `0`. |
 
 ---
 

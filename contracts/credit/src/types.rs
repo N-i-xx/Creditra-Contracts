@@ -46,10 +46,11 @@ pub enum CreditStatus {
 /// | 12   | `Overflow`                     | Arithmetic overflow during calculation |
 /// | 13   | `LimitDecreaseRequiresRepayment` | Limit decrease below utilized amount |
 /// | 14   | `AlreadyInitialized`           | Contract already initialized |
-/// | 15   | `AdminAcceptTooEarly`          | Admin acceptance attempted before delay elapsed |
-/// | 16   | `BorrowerBlocked`              | Borrower is on the blocked list |
-/// | 17   | `DrawExceedsMaxAmount`         | Draw amount exceeds per-transaction cap |
-/// | 18   | `Paused`                       | Protocol is paused; operation blocked by circuit breaker |
+/// | 15   | `DrawsFrozen`                  | All draws are globally frozen by admin for liquidity reserve operations |
+/// | 16   | `DrawExceedsMaxAmount`         | Draw amount exceeds per-transaction cap |
+/// | 17   | `BorrowerBlocked`              | Borrower is on the blocked list |
+/// | 18   | `AdminAcceptTooEarly`          | Admin acceptance attempted before delay elapsed |
+/// | 19   | `DrawCooldownActive`           | Borrower attempted to draw before the configured cooldown elapsed |
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -90,6 +91,10 @@ pub enum ContractError {
     BorrowerBlocked = 17,
     /// Admin acceptance attempted before the delay window has elapsed.
     AdminAcceptTooEarly = 18,
+    /// Protocol is paused; operation blocked by circuit breaker.
+    Paused = 19,
+    /// Borrower attempted to draw before the configured cooldown elapsed.
+    DrawCooldownActive = 20,
 }
 
 /// Stored credit line data for a borrower.
@@ -132,7 +137,6 @@ pub struct RateChangeConfig {
     pub max_rate_change_bps: u32,
     /// Minimum elapsed seconds between two consecutive rate changes.
     pub rate_change_min_interval: u64,
-}
 }
 
 /// Admin-configurable piecewise-linear rate formula.

@@ -29,10 +29,12 @@ fn error_discriminants_are_stable() {
     assert_eq!(ContractError::Overflow as u32, 12);
     assert_eq!(ContractError::LimitDecreaseRequiresRepayment as u32, 13);
     assert_eq!(ContractError::AlreadyInitialized as u32, 14);
-    assert_eq!(ContractError::AdminAcceptTooEarly as u32, 15);
-    assert_eq!(ContractError::BorrowerBlocked as u32, 16);
-    assert_eq!(ContractError::DrawExceedsMaxAmount as u32, 17);
-    assert_eq!(ContractError::Paused as u32, 18);
+    assert_eq!(ContractError::DrawsFrozen as u32, 15);
+    assert_eq!(ContractError::DrawExceedsMaxAmount as u32, 16);
+    assert_eq!(ContractError::BorrowerBlocked as u32, 17);
+    assert_eq!(ContractError::AdminAcceptTooEarly as u32, 18);
+    assert_eq!(ContractError::Paused as u32, 19);
+    assert_eq!(ContractError::DrawCooldownActive as u32, 20);
 }
 
 /// Verify no two variants share the same discriminant.
@@ -61,6 +63,7 @@ fn no_duplicate_discriminants() {
         ContractError::BorrowerBlocked as u32,
         ContractError::DrawExceedsMaxAmount as u32,
         ContractError::Paused as u32,
+        ContractError::DrawCooldownActive as u32,
     ];
 
     let unique: HashSet<u32> = codes.iter().cloned().collect();
@@ -75,8 +78,8 @@ fn no_duplicate_discriminants() {
 /// Update this number when adding new variants (and add the assertion above).
 #[test]
 fn variant_count_is_known() {
-    // 18 variants as of this writing. Update when adding new ones.
-    const EXPECTED_VARIANT_COUNT: usize = 18;
+    // 20 variants as of this writing. Update when adding new ones.
+    const EXPECTED_VARIANT_COUNT: usize = 20;
 
     let codes = [
         ContractError::Unauthorized as u32,
@@ -97,6 +100,7 @@ fn variant_count_is_known() {
         ContractError::BorrowerBlocked as u32,
         ContractError::DrawExceedsMaxAmount as u32,
         ContractError::Paused as u32,
+        ContractError::DrawCooldownActive as u32,
     ];
 
     assert_eq!(
