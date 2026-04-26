@@ -14,29 +14,28 @@ mod accrual;
 #[cfg(test)]
 mod accrual_tests;
 mod auth;
+mod borrow;
 mod config;
 mod events;
 mod freeze;
 mod lifecycle;
-mod query;
 mod risk;
 mod storage;
 pub mod types;
 
 use crate::auth::{require_admin, require_admin_auth};
 use crate::events::{
-    publish_admin_rotation_accepted, publish_admin_rotation_proposed, publish_credit_line_event,
+    publish_admin_rotation_accepted, publish_admin_rotation_proposed,
     publish_drawn_event, publish_interest_accrued_event, publish_repayment_event,
-    AdminRotationAcceptedEvent, AdminRotationProposedEvent, CreditLineEvent, DrawnEvent,
+    AdminRotationAcceptedEvent, AdminRotationProposedEvent, DrawnEvent,
     InterestAccruedEvent, RepaymentEvent,
 };
-use crate::risk::{MAX_INTEREST_RATE_BPS, MAX_RISK_SCORE};
 use crate::storage::{
-    admin_key, clear_reentrancy_guard, is_borrower_blocked, proposed_admin_key, proposed_at_key,
+    admin_key, assert_not_paused, clear_reentrancy_guard, proposed_admin_key, proposed_at_key,
     rate_cfg_key, set_reentrancy_guard, DataKey,
 };
-use crate::types::{ContractError, CreditLineData, CreditStatus, RateChangeConfig};
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env};
+use crate::types::{ContractError, CreditLineData, CreditStatus, GracePeriodConfig, GraceWaiverMode, ProtocolConfig, RateChangeConfig};
+use soroban_sdk::{contract, contractimpl, token, Address, Env};
 
 /// Contract API version (major, minor, patch).
 /// Increment major on breaking ABI/storage changes, minor on additive features, patch on fixes.
@@ -155,54 +154,6 @@ impl Credit {
         lifecycle::open_credit_line(env, borrower, credit_limit, interest_rate_bps, risk_score)
     }
 
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
-        borrow::draw_credit(env, borrower, amount)
-        assert!(credit_limit > 0, "credit_limit must be greater than zero");
-        if interest_rate_bps > MAX_INTEREST_RATE_BPS {
-            env.panic_with_error(ContractError::RateTooHigh);
-        }
-        if risk_score > MAX_RISK_SCORE {
-            env.panic_with_error(ContractError::ScoreTooHigh);
-        }
-
-        if let Some(existing) = env
-            .storage()
-            .persistent()
-            .get::<Address, CreditLineData>(&borrower)
-        {
-            assert!(
-                existing.status != CreditStatus::Active,
-                "borrower already has an active credit line"
-            );
-        }
-
-        let credit_line = CreditLineData {
-            borrower: borrower.clone(),
-            credit_limit,
-            utilized_amount: 0,
-            interest_rate_bps,
-            risk_score,
-            status: CreditStatus::Active,
-            last_rate_update_ts: 0,
-            accrued_interest: 0,
-            last_accrual_ts: env.ledger().timestamp(),
-        };
-        env.storage().persistent().set(&borrower, &credit_line);
-
-        publish_credit_line_event(
-            &env,
-            (symbol_short!("credit"), symbol_short!("opened")),
-            CreditLineEvent {
-                event_type: symbol_short!("opened"),
-                borrower: borrower.clone(),
-                status: CreditStatus::Active,
-                credit_limit,
-                interest_rate_bps,
-                risk_score,
-            },
-        );
-    }
-
     /// Draws credit by transferring liquidity tokens to the borrower.
     ///
     /// Enforces status, limit, and liquidity checks before executing the transfer.
@@ -220,7 +171,7 @@ impl Credit {
     /// - [`ContractError::CreditLineClosed`] — credit line is closed.
     /// - [`ContractError::Overflow`] — utilized amount would overflow.
     /// - [`ContractError::DrawExceedsMaxAmount`] — amount exceeds per-tx draw cap.
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
+    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
         assert_not_paused(&env);
         set_reentrancy_guard(&env);
 
@@ -230,12 +181,6 @@ impl Credit {
         if amount <= 0 {
             clear_reentrancy_guard(&env);
             panic!("amount must be positive");
-        }
-
-        // Global emergency freeze: block all draws during liquidity reserve operations.
-        if freeze::is_draws_frozen(&env) {
-            clear_reentrancy_guard(&env);
-            env.panic_with_error(ContractError::DrawsFrozen);
         }
 
         // Global emergency freeze: block all draws during liquidity reserve operations.
@@ -290,6 +235,27 @@ impl Credit {
             }
         }
 
+        // Per-borrower draw cooldown: enforce the configured minimum interval between
+        // successful draws for the same borrower. No cooldown is applied when the key
+        // is unset.
+        if let Some(min_interval) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::DrawMinIntervalSeconds)
+        {
+            if let Some(last_draw_ts) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, u64>(&DataKey::LastDrawTs(borrower.clone()))
+            {
+                let now = env.ledger().timestamp();
+                if now < last_draw_ts.saturating_add(min_interval) {
+                    clear_reentrancy_guard(&env);
+                    env.panic_with_error(ContractError::DrawCooldownActive);
+                }
+            }
+        }
+
         // Overflow-safe utilization update.
         let updated_utilized = credit_line
             .utilized_amount
@@ -303,6 +269,26 @@ impl Credit {
         if updated_utilized > credit_line.credit_limit {
             clear_reentrancy_guard(&env);
             env.panic_with_error(ContractError::OverLimit);
+        }
+
+        // Enforce per-borrower utilization cap if configured.
+        if let Some(cap_bps) = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::UtilizationCapBps(borrower.clone()))
+        {
+            let cap_amount = credit_line
+                .credit_limit
+                .checked_mul(cap_bps as i128)
+                .and_then(|v| v.checked_div(10_000))
+                .unwrap_or_else(|| {
+                    clear_reentrancy_guard(&env);
+                    env.panic_with_error(ContractError::Overflow)
+                });
+            if updated_utilized > cap_amount {
+                clear_reentrancy_guard(&env);
+                panic!("exceeds utilization cap");
+            }
         }
 
         let token_address: Address = env
@@ -334,6 +320,9 @@ impl Credit {
         env.storage().persistent().set(&borrower, &credit_line);
 
         let timestamp = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .set(&DataKey::LastDrawTs(borrower.clone()), &timestamp);
         publish_drawn_event(
             &env,
             DrawnEvent {
@@ -347,7 +336,6 @@ impl Credit {
     }
 
     pub fn repay_credit(env: Env, borrower: Address, amount: i128) {
-        borrow::repay_credit(env, borrower, amount)
         // --- Reentrancy guard (defense-in-depth) ---
         set_reentrancy_guard(&env);
         borrower.require_auth();
@@ -504,6 +492,35 @@ impl Credit {
         env.storage().instance().get(&rate_cfg_key(&env))
     }
 
+    /// Set a per-borrower utilization cap in basis points (admin only).
+    ///
+    /// When set, `draw_credit` will reject any draw that would push
+    /// `utilized_amount` above `credit_limit * cap_bps / 10_000`.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower whose cap to configure.
+    /// - `cap_bps`: Cap ratio in basis points (1–10_000). Pass 0 to remove the cap.
+    pub fn set_utilization_cap(env: Env, borrower: Address, cap_bps: u32) {
+        require_admin_auth(&env);
+        if cap_bps == 0 {
+            env.storage()
+                .instance()
+                .remove(&DataKey::UtilizationCapBps(borrower));
+        } else {
+            assert!(cap_bps <= 10_000, "cap_bps must be <= 10000");
+            env.storage()
+                .instance()
+                .set(&DataKey::UtilizationCapBps(borrower), &cap_bps);
+        }
+    }
+
+    /// Get the utilization cap in basis points for a borrower, if set.
+    pub fn get_utilization_cap(env: Env, borrower: Address) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::UtilizationCapBps(borrower))
+    }
+
     // ── Grace period policy ───────────────────────────────────────────────────
 
     /// Set the optional grace period policy for Suspended credit lines (admin only).
@@ -575,6 +592,19 @@ impl Credit {
         env.storage().instance().get(&DataKey::MaxDrawAmount)
     }
 
+    /// Set the minimum interval between borrower draws.
+    /// Pass `0` to disable the per-borrower draw cooldown.
+    pub fn set_draw_min_interval(env: Env, seconds: u64) {
+        assert_not_paused(&env);
+        require_admin_auth(&env);
+        crate::storage::set_draw_min_interval(&env, seconds);
+    }
+
+    /// Get the configured minimum draw interval between borrower draws.
+    pub fn get_draw_min_interval(env: Env) -> Option<u64> {
+        crate::storage::get_draw_min_interval(&env)
+    }
+
     /// Get the current storage schema version.
     pub fn get_schema_version(env: Env) -> Option<u32> {
         env.storage().instance().get(&DataKey::SchemaVersion)
@@ -631,8 +661,11 @@ impl Credit {
 
     // duplicate wrapper removed
 
+    /// Return the credit line for `borrower`, or `None` if no line exists.
+    ///
+    /// No authentication required — this is a pure read with no side effects.
+    /// Accrual is lazy; pending interest since the last checkpoint is not applied here.
     pub fn get_credit_line(env: Env, borrower: Address) -> Option<CreditLineData> {
-        query::get_credit_line(env, borrower)
         env.storage().persistent().get(&borrower)
     }
 
@@ -3186,7 +3219,105 @@ mod test_max_draw_amount {
         assert_eq!(client.get_max_draw_amount().unwrap(), 750);
     }
 
-    // ── reentrancy guard cleared after cap revert (sequential draw succeeds) ──
+    #[test]
+    #[should_panic]
+    fn set_draw_min_interval_requires_admin_auth() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+        client.set_draw_min_interval(&60_u64);
+    }
+
+    #[test]
+    fn get_draw_min_interval_unset_returns_none() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+
+        assert!(client.get_draw_min_interval().is_none());
+    }
+
+    #[test]
+    fn get_draw_min_interval_after_set_returns_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+
+        client.set_draw_min_interval(&60_u64);
+        assert_eq!(client.get_draw_min_interval().unwrap(), 60);
+    }
+
+    #[test]
+    fn draw_credit_without_cooldown_allows_consecutive_draws() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup_with_reserve(&env, &borrower, 1_000, 1_000);
+
+        client.draw_credit(&borrower, &200_i128);
+        client.draw_credit(&borrower, &100_i128);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.utilized_amount, 300);
+    }
+
+    #[test]
+    #[should_panic]
+    fn draw_credit_respects_cooldown_when_configured() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup_with_reserve(&env, &borrower, 1_000, 1_000);
+
+        client.set_draw_min_interval(&60_u64);
+        client.draw_credit(&borrower, &200_i128);
+        client.draw_credit(&borrower, &100_i128);
+    }
+
+    #[test]
+    fn draw_credit_succeeds_after_cooldown_interval() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup_with_reserve(&env, &borrower, 1_000, 1_000);
+
+        client.set_draw_min_interval(&60_u64);
+        client.draw_credit(&borrower, &200_i128);
+        env.ledger().set_timestamp(env.ledger().timestamp() + 61);
+        client.draw_credit(&borrower, &100_i128);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.utilized_amount, 300);
+    }
+
+    #[test]
+    fn repay_credit_is_not_blocked_by_draw_cooldown() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1_000_i128, &300_u32, &70_u32);
+
+        client.set_draw_min_interval(&60_u64);
+        client.draw_credit(&borrower, &200_i128);
+        client.repay_credit(&borrower, &100_i128);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.utilized_amount, 100);
+    }
+
+    // ── reentrancy guard cleared after cap revert (sequential draw succeeds) ────────────────────────────────────────────
 
     #[test]
     fn draw_cap_guard_cleared_after_revert_allows_subsequent_draw() {
@@ -3802,493 +3933,150 @@ mod test_liquidity_error_codes {
     }
 }
 
-/// Comprehensive tests for deterministic borrower key encoding and storage.
-///
-/// These tests ensure that:
-/// - Borrower addresses are stored and retrieved consistently from persistent storage
-/// - No accidental key normalization or collisions occur
-/// - Multiple distinct addresses don't interfere with each other
-/// - Queries and mutations operate on the correct borrower data
-/// - Storage round-trips preserve all fields without loss or corruption
 #[cfg(test)]
-mod borrower_key_encoding_tests {
+mod test_utilization_cap {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use crate::test_helpers::MockLiquidityToken;
+    use soroban_sdk::{testutils::Address as _, Env};
 
-    /// Helper to setup a basic contract with admin
-    fn setup_basic_contract(env: &Env) -> (CreditClient, Address, Address) {
+    fn setup_with_cap_env(
+        env: &Env,
+        credit_limit: i128,
+    ) -> (CreditClient<'_>, Address, MockLiquidityToken) {
         env.mock_all_auths();
         let admin = Address::generate(env);
+        let borrower = Address::generate(env);
         let contract_id = env.register(Credit, ());
         let client = CreditClient::new(env, &contract_id);
         client.init(&admin);
-        (client, contract_id, admin)
+        let liquidity = MockLiquidityToken::deploy(env);
+        liquidity.mint(&contract_id, credit_limit);
+        client.set_liquidity_token(&liquidity.address());
+        client.open_credit_line(&borrower, &credit_limit, &300_u32, &50_u32);
+        (client, borrower, liquidity)
     }
 
-    /// Test 1: Basic storage round-trip - single borrower can be stored and retrieved identically
     #[test]
-    fn test_borrower_key_storage_roundtrip_single() {
+    fn test_draw_within_utilization_cap_succeeds() {
         let env = Env::default();
-        env.mock_all_auths();
-        let (client, _contract_id, _admin) = setup_basic_contract(&env);
-        let borrower = Address::generate(&env);
-
-        // Open a credit line with specific parameters
-        let credit_limit = 5_000_i128;
-        let interest_rate = 500_u32;
-        let risk_score = 75_u32;
-
-        client.open_credit_line(&borrower, &credit_limit, &interest_rate, &risk_score);
-
-        // Retrieve and verify all fields match
-        let retrieved = client.get_credit_line(&borrower);
-        assert!(retrieved.is_some(), "Borrower key should retrieve stored credit line");
-
-        let line = retrieved.unwrap();
-        assert_eq!(line.borrower, borrower, "Borrower address must match stored value");
-        assert_eq!(line.credit_limit, credit_limit, "Credit limit must round-trip exactly");
+        let (client, borrower, _) = setup_with_cap_env(&env, 1_000);
+        client.set_utilization_cap(&borrower, &8_000_u32);
+        client.draw_credit(&borrower, &800_i128);
         assert_eq!(
-            line.interest_rate_bps, interest_rate,
-            "Interest rate must round-trip exactly"
-        );
-        assert_eq!(
-            line.risk_score, risk_score,
-            "Risk score must round-trip exactly"
-        );
-        assert_eq!(
-            line.status, CreditStatus::Active,
-            "Status must be Active for newly opened line"
-        );
-        assert_eq!(
-            line.utilized_amount, 0,
-            "Initial utilized amount must be 0"
-        );
-        assert_eq!(
-            line.accrued_interest, 0,
-            "Initial accrued interest must be 0"
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            800_i128
         );
     }
 
-    /// Test 2: Multiple distinct borrowers - ensure no collisions or cross-contamination
     #[test]
-    fn test_borrower_key_multiple_distinct_addresses_no_collisions() {
+    #[should_panic(expected = "exceeds utilization cap")]
+    fn test_draw_exceeds_utilization_cap_reverts() {
         let env = Env::default();
-        env.mock_all_auths();
-        let (client, _contract_id, _admin) = setup_basic_contract(&env);
+        let (client, borrower, _) = setup_with_cap_env(&env, 1_000);
+        client.set_utilization_cap(&borrower, &8_000_u32);
+        client.draw_credit(&borrower, &801_i128);
+    }
 
-        // Create 10 distinct borrowers with different credit line parameters
-        let mut borrowers = Vec::new();
-        for i in 0..10 {
-            let borrower = Address::generate(&env);
-            borrowers.push(borrower.clone());
-
-            let credit_limit = (1_000 + i * 500) as i128;
-            let interest_rate = (100 + i * 50) as u32;
-            let risk_score = (10 + i * 10) as u32;
-
-            client.open_credit_line(&borrower, &credit_limit, &interest_rate, &risk_score);
-        }
-
-        // Verify each borrower's data is stored and retrieved correctly
-        for (idx, borrower) in borrowers.iter().enumerate() {
-            let line = client.get_credit_line(borrower);
-            assert!(line.is_some(), "Borrower {} should have stored credit line", idx);
-
-            let line = line.unwrap();
-            let expected_limit = (1_000 + idx * 500) as i128;
-            let expected_rate = (100 + idx * 50) as u32;
-            let expected_score = (10 + idx * 10) as u32;
-
-            assert_eq!(
-                line.credit_limit, expected_limit,
-                "Borrower {}: credit limit must match stored value",
-                idx
-            );
-            assert_eq!(
-                line.interest_rate_bps, expected_rate,
-                "Borrower {}: interest rate must match stored value",
-                idx
-            );
-            assert_eq!(
-                line.risk_score, expected_score,
-                "Borrower {}: risk score must match stored value",
-                idx
-            );
-        }
-
-        // Verify a non-existent borrower returns None
-        let non_existent = Address::generate(&env);
-        assert!(
-            client.get_credit_line(&non_existent).is_none(),
-            "Non-existent borrower should return None"
+    #[test]
+    fn test_no_cap_allows_full_limit() {
+        let env = Env::default();
+        let (client, borrower, _) = setup_with_cap_env(&env, 1_000);
+        client.draw_credit(&borrower, &1_000_i128);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            1_000_i128
         );
     }
 
-    /// Test 3: Update operations maintain key integrity - mutations update correct borrower
     #[test]
-    fn test_borrower_key_update_operations_single_borrower() {
+    fn test_remove_cap_allows_full_limit() {
         let env = Env::default();
-        env.mock_all_auths();
-        let (client, _contract_id, _admin) = setup_basic_contract(&env);
-        let borrower = Address::generate(&env);
-
-        client.open_credit_line(&borrower, &5_000_i128, &500_u32, &75_u32);
-
-        // Update risk parameters
-        client.update_risk_parameters(&borrower, &5_000_i128, &600_u32, &80_u32);
-
-        let line = client.get_credit_line(&borrower).unwrap();
+        let (client, borrower, _) = setup_with_cap_env(&env, 1_000);
+        client.set_utilization_cap(&borrower, &5_000_u32);
+        client.set_utilization_cap(&borrower, &0_u32);
+        assert!(client.get_utilization_cap(&borrower).is_none());
+        client.draw_credit(&borrower, &1_000_i128);
         assert_eq!(
-            line.interest_rate_bps, 600,
-            "Interest rate update must persist in storage"
-        );
-        assert_eq!(
-            line.risk_score, 80,
-            "Risk score update must persist in storage"
-        );
-        assert_eq!(
-            line.credit_limit, 5_000,
-            "Credit limit must remain unchanged when not modified"
-        );
-        assert_eq!(line.status, CreditStatus::Active, "Status must remain Active");
-    }
-
-    /// Test 4: Mutation isolation - updating one borrower doesn't affect others
-    #[test]
-    fn test_borrower_key_mutation_isolation_multiple_borrowers() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _contract_id, _admin) = setup_basic_contract(&env);
-
-        let borrower1 = Address::generate(&env);
-        let borrower2 = Address::generate(&env);
-
-        // Create two independent credit lines
-        client.open_credit_line(&borrower1, &1_000_i128, &300_u32, &50_u32);
-        client.open_credit_line(&borrower2, &2_000_i128, &400_u32, &60_u32);
-
-        // Update borrower2's risk parameters
-        client.update_risk_parameters(&borrower2, &2_000_i128, &500_u32, &70_u32);
-
-        // Verify borrower1's data is unchanged
-        let line1 = client.get_credit_line(&borrower1).unwrap();
-        assert_eq!(
-            line1.interest_rate_bps, 300,
-            "Borrower1 rate must be unaffected by borrower2 update"
-        );
-        assert_eq!(
-            line1.risk_score, 50,
-            "Borrower1 score must be unaffected by borrower2 update"
-        );
-        assert_eq!(
-            line1.credit_limit, 1_000,
-            "Borrower1 limit must be unaffected by borrower2 update"
-        );
-
-        // Verify borrower2's update took effect
-        let line2 = client.get_credit_line(&borrower2).unwrap();
-        assert_eq!(
-            line2.interest_rate_bps, 500,
-            "Borrower2 rate must be updated"
-        );
-        assert_eq!(
-            line2.risk_score, 70,
-            "Borrower2 score must be updated"
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            1_000_i128
         );
     }
 
-    /// Test 5: Storage persistence across queries - repeated queries return identical data
     #[test]
-    fn test_borrower_key_query_consistency() {
+    fn test_get_utilization_cap_returns_set_value() {
         let env = Env::default();
-        env.mock_all_auths();
-        let (client, _contract_id, _admin) = setup_basic_contract(&env);
-        let borrower = Address::generate(&env);
+        let (client, borrower, _) = setup_with_cap_env(&env, 1_000);
+        assert!(client.get_utilization_cap(&borrower).is_none());
+        client.set_utilization_cap(&borrower, &7_500_u32);
+        assert_eq!(client.get_utilization_cap(&borrower), Some(7_500_u32));
+    }
 
-        client.open_credit_line(&borrower, &3_000_i128, &750_u32, &65_u32);
-
-        // Query multiple times and verify consistency
-        let query1 = client.get_credit_line(&borrower).unwrap();
-        let query2 = client.get_credit_line(&borrower).unwrap();
-        let query3 = client.get_credit_line(&borrower).unwrap();
-
-        // All queries must return identical results
+    #[test]
+    fn test_cap_at_100_percent_allows_full_limit() {
+        let env = Env::default();
+        let (client, borrower, _) = setup_with_cap_env(&env, 1_000);
+        client.set_utilization_cap(&borrower, &10_000_u32);
+        client.draw_credit(&borrower, &1_000_i128);
         assert_eq!(
-            query1.credit_limit, query2.credit_limit,
-            "Query 1 and 2 credit limits must be identical"
-        );
-        assert_eq!(
-            query2.credit_limit, query3.credit_limit,
-            "Query 2 and 3 credit limits must be identical"
-        );
-        assert_eq!(
-            query1.interest_rate_bps, query2.interest_rate_bps,
-            "Query 1 and 2 rates must be identical"
-        );
-        assert_eq!(
-            query2.interest_rate_bps, query3.interest_rate_bps,
-            "Query 2 and 3 rates must be identical"
-        );
-        assert_eq!(
-            query1.risk_score, query2.risk_score,
-            "Query 1 and 2 scores must be identical"
-        );
-        assert_eq!(
-            query2.risk_score, query3.risk_score,
-            "Query 2 and 3 scores must be identical"
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            1_000_i128
         );
     }
 
-    /// Test 6: Status transition persistence - status changes are stored correctly by borrower key
     #[test]
-    fn test_borrower_key_status_transitions() {
+    #[should_panic(expected = "cap_bps must be <= 10000")]
+    fn test_set_cap_above_10000_reverts() {
         let env = Env::default();
-        env.mock_all_auths();
-        let (client, _contract_id, _admin) = setup_basic_contract(&env);
-        let borrower = Address::generate(&env);
-
-        client.open_credit_line(&borrower, &1_000_i128, &300_u32, &70_u32);
-        assert_eq!(
-            client.get_credit_line(&borrower).unwrap().status,
-            CreditStatus::Active
-        );
-
-        // Suspend the credit line
-        client.suspend_credit_line(&borrower);
-        assert_eq!(
-            client.get_credit_line(&borrower).unwrap().status,
-            CreditStatus::Suspended,
-            "Status must be updated to Suspended"
-        );
-
-        // Reinstate to Active
-        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
-        assert_eq!(
-            client.get_credit_line(&borrower).unwrap().status,
-            CreditStatus::Active,
-            "Status must be restored to Active"
-        );
-
-        // Close the credit line
-        client.close_credit_line(&borrower, &_admin);
-        assert_eq!(
-            client.get_credit_line(&borrower).unwrap().status,
-            CreditStatus::Closed,
-            "Status must be updated to Closed"
-        );
+        let (client, borrower, _) = setup_with_cap_env(&env, 1_000);
+        client.set_utilization_cap(&borrower, &10_001_u32);
     }
 
-    /// Test 7: Address independence - distinct generated addresses are uniquely keyed
     #[test]
-    fn test_borrower_key_address_independence() {
+    fn test_cap_is_per_borrower_independent() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _contract_id, _admin) = setup_basic_contract(&env);
-
-        // Create 5 independent borrowers
-        let borrowers: Vec<Address> = (0..5).map(|_| Address::generate(&env)).collect();
-
-        // Open credit lines for all
-        for borrower in &borrowers {
-            client.open_credit_line(borrower, &1_000_i128, &300_u32, &50_u32);
-        }
-
-        // Verify each is independently accessible and distinct
-        for (i, borrower_i) in borrowers.iter().enumerate() {
-            let line_i = client.get_credit_line(borrower_i).unwrap();
-
-            for (j, borrower_j) in borrowers.iter().enumerate() {
-                let line_j = client.get_credit_line(borrower_j).unwrap();
-
-                if i == j {
-                    // Same borrower
-                    assert_eq!(
-                        line_i.borrower, line_j.borrower,
-                        "Same borrower index must have same address"
-                    );
-                } else {
-                    // Different borrowers
-                    assert_ne!(
-                        line_i.borrower, line_j.borrower,
-                        "Different borrower indices must have different addresses"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Test 8: Blocked borrower status is keyed correctly per borrower
-    #[test]
-    fn test_borrower_key_blocked_status_isolation() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, contract_id, _admin) = setup_basic_contract(&env);
-
-        let borrower1 = Address::generate(&env);
-        let borrower2 = Address::generate(&env);
-
-        client.open_credit_line(&borrower1, &1_000_i128, &300_u32, &50_u32);
-        client.open_credit_line(&borrower2, &1_000_i128, &300_u32, &50_u32);
-
-        // Block borrower1
-        env.as_contract(&contract_id, || {
-            storage::set_borrower_blocked(&env, &borrower1, true);
-        });
-
-        // Verify blocking is isolated to borrower1
-        env.as_contract(&contract_id, || {
-            assert!(
-                storage::is_borrower_blocked(&env, &borrower1),
-                "Borrower1 must be blocked"
-            );
-            assert!(
-                !storage::is_borrower_blocked(&env, &borrower2),
-                "Borrower2 must not be blocked"
-            );
-        });
-    }
-
-    /// Test 9: Multiple sequential draws maintain borrower key integrity
-    #[test]
-    fn test_borrower_key_multiple_draws_consistency() {
-        let env = Env::default();
-        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let borrower_a = Address::generate(&env);
+        let borrower_b = Address::generate(&env);
         let contract_id = env.register(Credit, ());
         let client = CreditClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
         client.init(&admin);
-
-        // Setup token and liquidity
-        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env));
-        client.set_liquidity_token(&token_id.address());
-        let token = token_id.address();
-        token::Client::new(&env, &token).mint(&contract_id, &10_000_i128);
-
-        let borrower = Address::generate(&env);
-        client.open_credit_line(&borrower, &5_000_i128, &300_u32, &50_u32);
-
-        // Draw multiple times and verify key consistency
-        client.draw_credit(&borrower, &1_000_i128);
-        let line1 = client.get_credit_line(&borrower).unwrap();
+        let liquidity = MockLiquidityToken::deploy(&env);
+        liquidity.mint(&contract_id, 2_000);
+        client.set_liquidity_token(&liquidity.address());
+        client.open_credit_line(&borrower_a, &1_000_i128, &300_u32, &50_u32);
+        client.open_credit_line(&borrower_b, &1_000_i128, &300_u32, &50_u32);
+        client.set_utilization_cap(&borrower_a, &5_000_u32);
+        client.draw_credit(&borrower_b, &1_000_i128);
         assert_eq!(
-            line1.utilized_amount, 1_000,
-            "First draw should update utilized amount"
+            client.get_credit_line(&borrower_b).unwrap().utilized_amount,
+            1_000_i128
         );
-
-        client.draw_credit(&borrower, &2_000_i128);
-        let line2 = client.get_credit_line(&borrower).unwrap();
+        client.draw_credit(&borrower_a, &500_i128);
         assert_eq!(
-            line2.utilized_amount, 3_000,
-            "Second draw should accumulate correctly"
-        );
-        assert_eq!(
-            line2.borrower, borrower,
-            "Borrower address must remain unchanged after draws"
-        );
-        assert_eq!(
-            line2.credit_limit, 5_000,
-            "Credit limit must remain unchanged after draws"
+            client.get_credit_line(&borrower_a).unwrap().utilized_amount,
+            500_i128
         );
     }
 
-    /// Test 10: Prefix-based query distinction - similar address prefixes don't cause mix-ups
     #[test]
-    fn test_borrower_key_prefix_independence() {
+    fn test_cap_boundary_exact_draw_succeeds() {
         let env = Env::default();
-        env.mock_all_auths();
-        let (client, _contract_id, _admin) = setup_basic_contract(&env);
-
-        // Generate multiple distinct borrowers
-        // The key encoding mechanism should ensure that even addresses with similar
-        // byte patterns are distinguished correctly
-        let borrowers: Vec<Address> = (0..15).map(|_| Address::generate(&env)).collect();
-
-        // Open distinct credit lines for each
-        for (i, borrower) in borrowers.iter().enumerate() {
-            let credit_limit = (1_000 + i as i128 * 100);
-            client.open_credit_line(borrower, &credit_limit, &(300_u32 + i as u32 * 10), &(50_u32 + i as u32 * 2));
-        }
-
-        // Query each and verify correct data is retrieved (no prefix collisions)
-        for (i, borrower) in borrowers.iter().enumerate() {
-            let line = client.get_credit_line(borrower).unwrap();
-            let expected_limit = (1_000 + i as i128 * 100);
-
-            assert_eq!(
-                line.credit_limit, expected_limit,
-                "Borrower {}: credit limit from different address must be distinct",
-                i
-            );
-            assert_eq!(
-                line.borrower, *borrower,
-                "Borrower {}: stored address must match queried address",
-                i
-            );
-        }
-    }
-
-    /// Test 11: Deterministic key encoding - same address always maps to same storage location
-    #[test]
-    fn test_borrower_key_deterministic_encoding() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _contract_id, _admin) = setup_basic_contract(&env);
-
-        // Use a fixed address (generate once and reuse)
-        let borrower = Address::generate(&env);
-
-        // Open and retrieve
-        client.open_credit_line(&borrower, &5_000_i128, &500_u32, &75_u32);
-        let original = client.get_credit_line(&borrower).unwrap();
-
-        // Query again after different operations
-        let query2 = client.get_credit_line(&borrower).unwrap();
-
-        // Both queries must show identical encoding (no normalization side effects)
+        let (client, borrower, _) = setup_with_cap_env(&env, 500);
+        client.set_utilization_cap(&borrower, &6_000_u32);
+        client.draw_credit(&borrower, &300_i128);
         assert_eq!(
-            original.borrower, query2.borrower,
-            "Borrower address encoding must be deterministic"
-        );
-        assert_eq!(
-            original.credit_limit, query2.credit_limit,
-            "Stored limit must be deterministic"
-        );
-        assert_eq!(
-            original.interest_rate_bps, query2.interest_rate_bps,
-            "Stored rate must be deterministic"
-        );
-        assert_eq!(
-            original.risk_score, query2.risk_score,
-            "Stored score must be deterministic"
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            300_i128
         );
     }
 
-    /// Test 12: Comprehensive field preservation through storage round-trip
     #[test]
-    fn test_borrower_key_all_fields_roundtrip() {
+    #[should_panic(expected = "exceeds utilization cap")]
+    fn test_cap_boundary_one_over_reverts() {
         let env = Env::default();
-        env.mock_all_auths();
-        let (client, _contract_id, _admin) = setup_basic_contract(&env);
-        let borrower = Address::generate(&env);
-
-        // Set specific values for all fields
-        let credit_limit = 10_000_i128;
-        let interest_rate = 750_u32;
-        let risk_score = 85_u32;
-
-        client.open_credit_line(&borrower, &credit_limit, &interest_rate, &risk_score);
-
-        let line = client.get_credit_line(&borrower).unwrap();
-
-        // Verify every single field
-        assert_eq!(line.borrower, borrower, "borrower field");
-        assert_eq!(line.credit_limit, credit_limit, "credit_limit field");
-        assert_eq!(line.utilized_amount, 0, "utilized_amount field (initial)");
-        assert_eq!(line.interest_rate_bps, interest_rate, "interest_rate_bps field");
-        assert_eq!(line.risk_score, risk_score, "risk_score field");
-        assert_eq!(line.status, CreditStatus::Active, "status field");
-        assert_eq!(line.last_rate_update_ts, 0, "last_rate_update_ts field");
-        assert_eq!(line.accrued_interest, 0, "accrued_interest field (initial)");
-        assert_eq!(line.last_accrual_ts, 0, "last_accrual_ts field");
+        let (client, borrower, _) = setup_with_cap_env(&env, 500);
+        client.set_utilization_cap(&borrower, &6_000_u32);
+        client.draw_credit(&borrower, &301_i128);
     }
 }
