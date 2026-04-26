@@ -64,27 +64,21 @@ pub fn publish_drawn_event(env: &Env, event: DrawnEvent) {
         .publish((symbol_short!("credit"), symbol_short!("drawn")), event);
 }
 
-pub fn publish_admin_rotation_proposed(env: &Env, proposed_admin: &Address, accept_after: u64) {
-    env.events().publish(
-        (symbol_short!("credit"), Symbol::new(env, "admin_prop")),
-        (proposed_admin.clone(), accept_after),
-    );
+/// Publish a draw reversal event.
+pub fn publish_draw_reversed_event(env: &Env, event: DrawReversedEvent) {
+    env.events()
+        .publish((symbol_short!("credit"), symbol_short!("draw_rev")), event);
 }
 
-pub fn publish_admin_rotation_accepted(env: &Env, new_admin: &Address) {
-    env.events().publish(
-        (symbol_short!("credit"), Symbol::new(env, "admin_acc")),
-        new_admin.clone(),
-    );
+/// Publish a v2 drawn event.
+#[allow(dead_code)]
+pub fn publish_drawn_event_v2(env: &Env, event: DrawnEventV2) {
+    env.events()
+        .publish((symbol_short!("credit"), symbol_short!("drawn_v2")), event);
 }
 
-pub fn publish_risk_parameters_updated(
-    env: &Env,
-    borrower: &Address,
-    credit_limit: i128,
-    interest_rate_bps: u32,
-    risk_score: u32,
-) {
+/// Publish a risk formula configuration event.
+pub fn publish_rate_formula_config_event(env: &Env, event: RateFormulaConfigEvent) {
     env.events().publish(
         (symbol_short!("credit"), symbol_short!("risk_upd")),
         (
@@ -115,30 +109,16 @@ pub fn publish_rate_formula_config_event(env: &Env, enabled: bool) {
     );
 }
 
-pub fn publish_default_liquidation_requested_event(
-    env: &Env,
-    borrower: &Address,
-    utilized_amount: i128,
-) {
-    env.events().publish(
-        (symbol_short!("credit"), Symbol::new(env, "liq_req")),
-        (borrower.clone(), utilized_amount),
-    );
-}
-
-pub fn publish_default_liquidation_settled_event(env: &Env, event: DefaultLiquidationSettledEvent) {
-    env.events().publish(
-        (symbol_short!("credit"), Symbol::new(env, "liq_setl")),
-        event,
-    );
-}
-
-pub fn publish_paused_event(env: &Env, paused: bool) {
-    let topic = if paused {
-        Symbol::new(env, "paused")
+/// Publish a borrower blocked/unblocked event.
+#[allow(dead_code)]
+pub fn publish_borrower_blocked_event(env: &Env, event: BorrowerBlockedEvent) {
+    let topic = if event.blocked {
+        symbol_short!("blocked")
     } else {
         Symbol::new(env, "unpaused")
     };
     env.events()
-        .publish((symbol_short!("credit"), topic), paused);
+        .publish((symbol_short!("credit"), symbol_short!("adm_prop")), event);
 }
+
+

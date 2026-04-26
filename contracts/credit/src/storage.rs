@@ -13,8 +13,15 @@ pub enum DataKey {
     /// Does not affect repayments. Distinct from per-line `Suspended` status.
     DrawsFrozen,
     MaxDrawAmount,
-    /// Storage schema version for migration tracking.
-    SchemaVersion,
+    /// Minimum interval in seconds required between successive draws for any borrower.
+    DrawMinIntervalSeconds,
+    /// Per-borrower last successful draw timestamp.
+    LastDrawTs(Address),
+    /// Per-borrower block flag; when `true`, draw_credit is rejected.
+    BlockedBorrower(Address),
+    /// Per-borrower max utilization ratio cap in basis points (e.g. 8000 = 80%).
+    /// When set, draw_credit enforces: utilized_amount <= credit_limit * cap_bps / 10_000.
+    UtilizationCapBps(Address),
 }
 
 pub fn admin_key(env: &Env) -> Symbol {
@@ -86,6 +93,65 @@ pub fn clear_reentrancy_guard(env: &Env) {
     env.storage().instance().set(&reentrancy_key(env), &false);
 }
 
+/// Check whether a borrower is blocked from drawing credit.
+///
+/// # Storage
+/// - **Type**: Persistent storage (independent TTL per borrower)
+/// - **Key**: `DataKey::BlockedBorrower(borrower)`
+/// - **TTL Note**: Each borrower's block status has its own TTL, independent
+///   of their credit line data. TTL should be extended on access.
+pub fn is_borrower_blocked(env: &Env, borrower: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::BlockedBorrower(borrower.clone()))
+        .unwrap_or(false)
+}
+
+/// Set or clear the blocked status for a borrower.
+///
+/// # Storage
+/// - **Type**: Persistent storage (independent TTL per borrower)
+/// - **Key**: `DataKey::BlockedBorrower(borrower)`
+/// - **TTL Note**: Writes extend the TTL for this specific borrower's block flag.
+#[allow(dead_code)]
+pub fn set_borrower_blocked(env: &Env, borrower: &Address, blocked: bool) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::BlockedBorrower(borrower.clone()), &blocked);
+}
+
+/// Get the configured minimum draw interval in seconds.
+pub fn get_draw_min_interval(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&DataKey::DrawMinIntervalSeconds)
+}
+
+/// Set or clear the configured minimum draw interval in seconds.
+pub fn set_draw_min_interval(env: &Env, interval_seconds: u64) {
+    if interval_seconds == 0 {
+        env.storage().instance().remove(&DataKey::DrawMinIntervalSeconds);
+    } else {
+        env.storage()
+            .instance()
+            .set(&DataKey::DrawMinIntervalSeconds, &interval_seconds);
+    }
+}
+
+/// Get the last successful draw timestamp for a borrower.
+pub fn get_last_draw_ts(env: &Env, borrower: &Address) -> Option<u64> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::LastDrawTs(borrower.clone()))
+}
+
+/// Record the last successful draw timestamp for a borrower.
+pub fn set_last_draw_ts(env: &Env, borrower: &Address, ts: u64) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::LastDrawTs(borrower.clone()), &ts);
+}
+
 /// Check whether the protocol is paused.
 ///
 /// # Storage
@@ -115,4 +181,9 @@ pub fn assert_not_paused(env: &Env) {
     if is_paused(env) {
         env.panic_with_error(crate::types::ContractError::Paused);
     }
+}
+
+/// Instance storage key for the grace period policy.
+pub fn grace_period_key(env: &Env) -> Symbol {
+    Symbol::new(env, "grace_cfg")
 }
