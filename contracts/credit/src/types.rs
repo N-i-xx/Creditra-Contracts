@@ -220,13 +220,19 @@ pub struct RateFormulaConfigEvent {
 }
 
 /// Structured representation of the contract's API version (semver).
+/// Grace period waiver mode for suspended credit lines.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ContractVersion {
-    /// Incremented on breaking ABI or storage layout changes.
-    pub major: u32,
-    /// Incremented on backward-compatible feature additions.
-    pub minor: u32,
-    /// Incremented on backward-compatible bug fixes.
-    pub patch: u32,
+pub enum GraceWaiverMode {
+    FullWaiver = 0,
+    ReducedRate = 1,
+}
+
+/// Admin-configurable grace period policy for suspended credit lines.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GracePeriodConfig {
+    pub grace_period_seconds: u64,
+    pub waiver_mode: GraceWaiverMode,
+    pub reduced_rate_bps: u32,
 }

@@ -1,5 +1,5 @@
 use crate::types::ContractError;
-use soroban_sdk::{contracttype, Address, Env, Symbol};
+use soroban_sdk::{contracttype, Env, Symbol};
 
 /// Storage keys used in instance and persistent storage.
 #[contracttype]
@@ -52,6 +52,11 @@ pub fn rate_formula_key(env: &Env) -> Symbol {
 /// Instance storage key for the protocol pause flag.
 pub fn paused_key(env: &Env) -> Symbol {
     Symbol::new(env, "paused")
+}
+
+/// Instance storage key for the grace period configuration.
+pub fn grace_period_key(env: &Env) -> Symbol {
+    Symbol::new(env, "grace_cfg")
 }
 
 /// Assert reentrancy guard is not set; set it for the duration of the call.

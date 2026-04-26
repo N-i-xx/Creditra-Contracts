@@ -47,6 +47,16 @@ pub fn compute_rate_from_score(cfg: &RateFormulaConfig, risk_score: u32) -> u32 
     raw.clamp(cfg.min_rate_bps, upper)
 }
 
+/// Set optional global rate-change caps (admin only).
+pub fn set_rate_change_limits(env: Env, max_rate_change_bps: u32, rate_change_min_interval: u64) {
+    assert_not_paused(&env);
+    require_admin_auth(&env);
+    let cfg = RateChangeConfig {
+        max_rate_change_bps,
+        rate_change_min_interval,
+    };
+    env.storage().instance().set(&rate_cfg_key(&env), &cfg);
+}
 
 /// Update risk parameters for an existing credit line (admin only).
 ///
@@ -160,15 +170,7 @@ pub fn update_risk_parameters(
     credit_line.risk_score = risk_score;
     env.storage().persistent().set(&borrower, &credit_line);
 
-    publish_risk_parameters_updated(
-        &env,
-        RiskParametersUpdatedEvent {
-            borrower: borrower.clone(),
-            credit_limit,
-            interest_rate_bps: effective_rate,
-            risk_score,
-        },
-    );
+    publish_risk_parameters_updated(&env, &borrower, credit_limit, effective_rate, risk_score);
 }
 
 /// Retrieve the rate formula configuration from instance storage, if set.
