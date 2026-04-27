@@ -313,6 +313,7 @@ impl Credit {
     /// - [`ContractError::InvalidAmount`] — `amount` is zero or negative.
     /// - [`ContractError::CreditLineNotFound`] — no credit line exists for `borrower`.
     /// - [`ContractError::CreditLineClosed`] — credit line is closed.
+    /// - [`ContractError::RepayExceedsMaxAmount`] — amount exceeds per-tx repay cap.
     pub fn repay_credit(env: Env, borrower: Address, amount: i128) {
         // --- Reentrancy guard (defense-in-depth) ---
         set_reentrancy_guard(&env);
@@ -321,6 +322,18 @@ impl Credit {
         if amount <= 0 {
             clear_reentrancy_guard(&env);
             env.panic_with_error(ContractError::InvalidAmount);
+        }
+
+        // Enforce per-transaction repay cap when configured.
+        if let Some(max_repay) = env
+            .storage()
+            .instance()
+            .get::<DataKey, i128>(&DataKey::MaxRepayAmount)
+        {
+            if amount > max_repay {
+                clear_reentrancy_guard(&env);
+                env.panic_with_error(ContractError::RepayExceedsMaxAmount);
+            }
         }
 
         let mut credit_line: CreditLineData = env
@@ -517,6 +530,21 @@ impl Credit {
 
     pub fn get_max_draw_amount(env: Env) -> Option<i128> {
         env.storage().instance().get(&DataKey::MaxDrawAmount)
+    }
+
+    pub fn set_max_repay_amount(env: Env, amount: i128) {
+        assert_not_paused(&env);
+        require_admin_auth(&env);
+        if amount <= 0 {
+            env.panic_with_error(ContractError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxRepayAmount, &amount);
+    }
+
+    pub fn get_max_repay_amount(env: Env) -> Option<i128> {
+        env.storage().instance().get(&DataKey::MaxRepayAmount)
     }
 
     /// Set the minimum interval between borrower draws.
@@ -3564,5 +3592,91 @@ mod test_utilization_cap {
         let (client, borrower, _) = setup_with_cap_env(&env, 500);
         client.set_utilization_cap(&borrower, &6_000_u32);
         client.draw_credit(&borrower, &301_i128);
+    }
+}
+
+#[cfg(test)]
+mod test_max_repay_amount {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::Env;
+    use crate::types::ContractError;
+    use soroban_sdk::token::StellarAssetClient;
+
+    fn setup_with_token(env: &Env) -> (CreditClient, Address, Address, Address) {
+        env.mock_all_auths();
+        let admin = Address::generate(env);
+        let borrower = Address::generate(env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(env, &contract_id);
+        client.init(&admin);
+        
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(env));
+        let token = token_id.address();
+        client.set_liquidity_token(&token);
+        
+        // Mint to contract to allow draw
+        StellarAssetClient::new(env, &token).mint(&contract_id, &5_000_i128);
+        
+        client.open_credit_line(&borrower, &1_000_i128, &300_u32, &70_u32);
+        
+        // Draw some credit to repay later
+        client.draw_credit(&borrower, &500_i128);
+        
+        // Mint to borrower so they have funds to repay
+        StellarAssetClient::new(env, &token).mint(&borrower, &5_000_i128);
+        
+        (client, admin, borrower, token)
+    }
+
+    #[test]
+    fn test_unset_max_repay_amount_allows_any() {
+        let env = Env::default();
+        let (client, _admin, borrower, _token) = setup_with_token(&env);
+        
+        assert_eq!(client.get_max_repay_amount(), None);
+        
+        client.repay_credit(&borrower, &400_i128);
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.utilized_amount, 100);
+    }
+
+    #[test]
+    fn test_set_and_get_max_repay_amount() {
+        let env = Env::default();
+        let (client, _admin, _borrower, _token) = setup_with_token(&env);
+        
+        client.set_max_repay_amount(&300_i128);
+        assert_eq!(client.get_max_repay_amount(), Some(300_i128));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #28)")]
+    fn test_repay_exceeds_max_cap_reverts() {
+        let env = Env::default();
+        let (client, _admin, borrower, _token) = setup_with_token(&env);
+        
+        client.set_max_repay_amount(&300_i128);
+        client.repay_credit(&borrower, &400_i128);
+    }
+
+    #[test]
+    fn test_repay_within_max_cap_succeeds() {
+        let env = Env::default();
+        let (client, _admin, borrower, _token) = setup_with_token(&env);
+        
+        client.set_max_repay_amount(&300_i128);
+        client.repay_credit(&borrower, &300_i128);
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.utilized_amount, 200);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn test_set_max_repay_amount_zero_or_negative() {
+        let env = Env::default();
+        let (client, _admin, _borrower, _token) = setup_with_token(&env);
+        
+        client.set_max_repay_amount(&0_i128);
     }
 }

@@ -13,6 +13,7 @@ pub enum DataKey {
     /// Does not affect repayments. Distinct from per-line `Suspended` status.
     DrawsFrozen,
     MaxDrawAmount,
+    MaxRepayAmount,
     /// Minimum interval in seconds required between successive draws for any borrower.
     DrawMinIntervalSeconds,
     /// Per-borrower last successful draw timestamp.

@@ -59,6 +59,7 @@ pub enum CreditStatus {
 /// | 25   | `LiquidityTokenCallFailed`     | Liquidity token call failed where observable |
 /// | 26   | `InsufficientRepaymentAllowance` | Borrower allowance cannot cover repayment |
 /// | 27   | `InsufficientRepaymentBalance` | Borrower balance cannot cover repayment |
+/// | 28   | `RepayExceedsMaxAmount`        | Repay amount exceeds per-transaction cap |
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -117,6 +118,8 @@ pub enum ContractError {
     InsufficientRepaymentAllowance = 26,
     /// Borrower's token balance is below the effective repayment amount.
     InsufficientRepaymentBalance = 27,
+    /// The requested repay exceeds the configured per-transaction maximum.
+    RepayExceedsMaxAmount = 28,
 }
 
 /// Stored credit line data for a borrower.
