@@ -129,6 +129,13 @@ impl Credit {
     /// - `credit_limit`: Maximum amount that can be drawn.
     /// - `interest_rate_bps`: Annual interest rate in basis points.
     /// - `risk_score`: Borrower's risk score (0-100).
+    ///
+    /// # Access Control
+    /// Admin only — requires admin authorization.
+    ///
+    /// # Enumeration
+    /// Each new credit line is assigned a sequential ID for pagination support.
+    /// Use `enumerate_credit_lines` to iterate through all credit lines.
     pub fn open_credit_line(
         env: Env,
         borrower: Address,
@@ -136,12 +143,11 @@ impl Credit {
         interest_rate_bps: u32,
         risk_score: u32,
     ) {
-        lifecycle::open_credit_line(env, borrower, credit_limit, interest_rate_bps, risk_score)
-    }
+        require_admin_auth(&env);
 
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
-        borrow::draw_credit(env, borrower, amount)
-        assert!(credit_limit > 0, "credit_limit must be greater than zero");
+        if credit_limit <= 0 {
+            env.panic_with_error(ContractError::NegativeLimit);
+        }
         if interest_rate_bps > MAX_INTEREST_RATE_BPS {
             env.panic_with_error(ContractError::RateTooHigh);
         }
@@ -149,15 +155,15 @@ impl Credit {
             env.panic_with_error(ContractError::ScoreTooHigh);
         }
 
+        // Check for existing active credit line
         if let Some(existing) = env
             .storage()
             .persistent()
             .get::<Address, CreditLineData>(&borrower)
         {
-            assert!(
-                existing.status != CreditStatus::Active,
-                "borrower already has an active credit line"
-            );
+            if existing.status == CreditStatus::Active {
+                env.panic_with_error(ContractError::CreditLineClosed); // Reusing error for duplicate
+            }
         }
 
         let credit_line = CreditLineData {
@@ -167,11 +173,15 @@ impl Credit {
             interest_rate_bps,
             risk_score,
             status: CreditStatus::Active,
-            last_rate_update_ts: 0,
+            last_rate_update_ts: env.ledger().timestamp(),
             accrued_interest: 0,
             last_accrual_ts: env.ledger().timestamp(),
+            suspension_ts: 0,
         };
         env.storage().persistent().set(&borrower, &credit_line);
+
+        // Add to enumeration index for pagination support
+        storage::add_credit_line_to_index(&env, &borrower);
 
         publish_credit_line_event(
             &env,
@@ -185,6 +195,15 @@ impl Credit {
                 risk_score,
             },
         );
+    }
+
+    /// Draw credit from an existing credit line.
+    ///
+    /// # Parameters
+    /// - `borrower`: The address drawing credit; must authorize this call.
+    /// - `amount`: The amount to draw; must be positive and within available limit.
+    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
+        borrow::draw_credit(env, borrower, amount)
     }
 
     /// Draws credit by transferring liquidity tokens to the borrower.
@@ -580,9 +599,67 @@ impl Credit {
 
     // duplicate wrapper removed
 
+    /// Get credit line data for a specific borrower.
+    ///
+    /// # Access Control
+    /// Public — anyone can query a credit line by borrower address.
     pub fn get_credit_line(env: Env, borrower: Address) -> Option<CreditLineData> {
         query::get_credit_line(env, borrower)
-        env.storage().persistent().get(&borrower)
+    }
+
+    /// Get the total count of credit lines opened.
+    ///
+    /// # Access Control
+    /// Public — anyone can query the total count.
+    pub fn get_credit_line_count(env: Env) -> u64 {
+        storage::get_credit_line_count(&env)
+    }
+
+    /// Enumerate credit lines with pagination.
+    ///
+    /// Returns a paginated list of credit lines in insertion order (by creation sequence).
+    /// Uses cursor-based pagination with sequential IDs assigned at credit line creation.
+    ///
+    /// # Parameters
+    /// - `start_after`: Optional credit line ID to start after (exclusive). Pass `None` to start from the beginning.
+    /// - `limit`: Number of entries to return (capped at 100 to prevent gas exhaustion).
+    ///
+    /// # Returns
+    /// Vector of `(credit_line_id, CreditLineData)` tuples.
+    ///
+    /// # Access Control
+    /// Public — anyone can enumerate credit lines for analytics purposes.
+    ///
+    /// # Gas Considerations
+    /// - Each entry requires one persistent storage read.
+    /// - Limit is capped at 100 to prevent gas exhaustion.
+    /// - For large datasets, use multiple paginated requests.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Get first 10 credit lines
+    /// let page1 = client.enumerate_credit_lines(&None, &10);
+    ///
+    /// // Get next 10 (using last ID from page1)
+    /// if let Some((last_id, _)) = page1.last() {
+    ///     let page2 = client.enumerate_credit_lines(&Some(*last_id), &10);
+    /// }
+    /// ```
+    pub fn enumerate_credit_lines(
+        env: Env,
+        start_after: Option<u64>,
+        limit: u32,
+    ) -> Vec<(u64, CreditLineData)> {
+        let page = storage::get_credit_lines_page(&env, start_after, limit);
+        let mut result = Vec::new(&env);
+
+        for (id, borrower) in page.iter() {
+            if let Some(data) = env.storage().persistent().get::<Address, CreditLineData>(&borrower) {
+                result.push_back((id, data));
+            }
+        }
+
+        result
     }
 
     // ── Global draw-freeze switch ─────────────────────────────────────────────

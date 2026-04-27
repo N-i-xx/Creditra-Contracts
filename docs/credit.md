@@ -341,6 +341,33 @@ Emits: `("credit", "reinstate")` event.
 ### `get_credit_line(env, borrower) -> Option<CreditLineData>`
 View function — returns credit line data or `None`.
 
+### `get_credit_line_count(env) -> u64`
+View function — returns the total number of credit lines that have been opened.
+
+### `enumerate_credit_lines(env, start_after, limit) -> Vec<(u64, CreditLineData)>`
+View function — returns a paginated list of credit lines in insertion order.
+
+#### Parameters
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `start_after` | `Option<u64>` | Credit line ID to start after (exclusive). Pass `None` to start from the beginning. |
+| `limit` | `u32` | Number of entries to return (capped at 100). |
+
+#### Example
+```rust
+// Get first 10 credit lines
+let page1 = client.enumerate_credit_lines(&None, &10);
+
+// Get next page using last ID
+if let Some((last_id, _)) = page1.last() {
+    let page2 = client.enumerate_credit_lines(&Some(*last_id), &10);
+}
+```
+
+- **Access**: Public (no authorization required).
+- **Ordering**: Insertion order (sequential IDs assigned at creation).
+- **Gas limit**: `limit` is capped at 100 to prevent gas exhaustion.
+
 ### `freeze_draws(env)`
 Freeze all `draw_credit` calls contract-wide (admin only).
 
