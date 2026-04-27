@@ -1,6 +1,6 @@
 use crate::auth::require_admin_auth;
 use crate::events::{publish_risk_parameters_updated, RiskParametersUpdatedEvent};
-use crate::storage::{rate_cfg_key, rate_formula_key};
+use crate::storage::{assert_ts_monotonic, rate_cfg_key, rate_formula_key};
 use crate::types::{CreditLineData, RateChangeConfig, RateFormulaConfig};
 
 /// Return the stored rate formula config, or None if unset.
@@ -142,12 +142,11 @@ pub fn update_risk_parameters(
             }
         }
 
-        credit_line.last_rate_update_ts = env.ledger().timestamp();
+        let new_ts = env.ledger().timestamp();
+        assert_ts_monotonic(&env, credit_line.last_rate_update_ts, new_ts);
+        credit_line.last_rate_update_ts = new_ts;
     }
-
-    credit_line.credit_limit = credit_limit;
     credit_line.interest_rate_bps = effective_rate;
-    credit_line.risk_score = risk_score;
     env.storage().persistent().set(&borrower, &credit_line);
 
     publish_risk_parameters_updated(

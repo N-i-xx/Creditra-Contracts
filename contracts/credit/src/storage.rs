@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 use crate::types::ContractError;
 use soroban_sdk::{contracttype, Address, Env, Symbol};
 
@@ -15,7 +17,15 @@ pub enum DataKey {
     MaxDrawAmount,
     /// Per-borrower block flag; when `true`, draw_credit is rejected.
     BlockedBorrower(Address),
+    /// Total count of credit lines opened (for pagination indexing).
+    CreditLineCount,
+    /// Credit line index: maps sequential ID to borrower address.
+    CreditLineById(u64),
 }
+
+/// Maximum number of credit lines returned per page.
+/// Limits gas consumption and response size for enumeration queries.
+pub const MAX_ENUMERATION_LIMIT: u32 = 100;
 
 pub fn admin_key(env: &Env) -> Symbol {
     Symbol::new(env, "admin")
@@ -104,4 +114,106 @@ pub fn assert_not_paused(env: &Env) {
     if is_paused(env) {
         env.panic_with_error(crate::types::ContractError::Paused);
     }
+}
+
+/// Assert that `new_ts` is strictly greater than `stored_ts` (monotonicity guard).
+///
+/// Reverts with [`ContractError::TimestampRegression`] if `new_ts <= stored_ts`.
+/// A `stored_ts` of zero is treated as "never written" and always passes.
+///
+/// # Ledger timestamp trust assumption
+/// The Soroban ledger timestamp is set by validators and is expected to be
+/// monotonically non-decreasing across ledgers. This guard enforces that
+/// assumption at the application layer: if a validator or test environment
+/// supplies a timestamp that would regress a stored value, the transaction
+/// is rejected rather than silently corrupting state.
+pub fn assert_ts_monotonic(env: &Env, stored_ts: u64, new_ts: u64) {
+    if stored_ts != 0 && new_ts <= stored_ts {
+        env.panic_with_error(crate::types::ContractError::TimestampRegression);
+    }
+}
+
+// ── Credit Line Enumeration ──────────────────────────────────────────────────
+
+/// Get the total count of credit lines opened.
+///
+/// # Storage
+/// - **Type**: Persistent storage (instance-level counter)
+/// - **Key**: `DataKey::CreditLineCount`
+/// - **TTL Note**: Shares persistent storage TTL; extended on each credit line creation.
+pub fn get_credit_line_count(env: &Env) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::CreditLineCount)
+        .unwrap_or(0)
+}
+
+/// Get a page of borrower addresses for credit lines.
+///
+/// Returns up to `limit` borrower addresses starting after `start_after` (exclusive).
+/// Uses sequential IDs assigned at credit line creation for deterministic ordering.
+///
+/// # Parameters
+/// - `start_after`: Optional ID to start after (for pagination). If `None`, starts from the beginning.
+/// - `limit`: Number of entries to return (capped at `MAX_ENUMERATION_LIMIT`).
+///
+/// # Returns
+/// Vector of `(id, borrower_address)` tuples.
+///
+/// # Access Control
+/// Public — anyone can enumerate credit lines for analytics purposes.
+///
+/// # Storage
+/// - **Type**: Persistent storage reads
+/// - **Key**: `DataKey::CreditLineById(u64)`
+/// - **TTL Note**: Read-only; no TTL extension needed.
+///
+/// # Gas Considerations
+/// - Each entry requires one persistent storage read.
+/// - `limit` is capped at `MAX_ENUMERATION_LIMIT` (100) to prevent gas exhaustion.
+pub fn get_credit_lines_page(
+    env: &Env,
+    start_after: Option<u64>,
+    limit: u32,
+) -> Vec<(u64, Address)> {
+    let limit = limit.min(MAX_ENUMERATION_LIMIT);
+    let count = get_credit_line_count(env);
+    let start_id = start_after.map(|id| id + 1).unwrap_or(0);
+    let mut result = Vec::new(env);
+
+    let mut current_id = start_id;
+    while result.len() < limit && current_id < count {
+        if let Some(borrower) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::CreditLineById(current_id))
+        {
+            result.push_back((current_id, borrower));
+        }
+        current_id += 1;
+    }
+
+    result
+}
+
+/// Add a new credit line to the enumeration index.
+///
+/// Called internally when opening a new credit line. Assigns the next sequential ID
+/// and stores the borrower address at that ID.
+///
+/// # Storage
+/// - Writes `DataKey::CreditLineById(next_id)` with the borrower address
+/// - Increments `DataKey::CreditLineCount`
+///
+/// # Returns
+/// The assigned credit line ID.
+pub fn add_credit_line_to_index(env: &Env, borrower: &Address) -> u64 {
+    let next_id = get_credit_line_count(env);
+    env.storage()
+        .persistent()
+        .set(&DataKey::CreditLineById(next_id), borrower);
+    env.storage()
+        .persistent()
+        .set(&DataKey::CreditLineCount, &(next_id + 1));
+    next_id
 }

@@ -1,6 +1,6 @@
 use crate::auth::{require_admin, require_admin_auth};
 use crate::events::{publish_credit_line_event, CreditLineEvent};
-use crate::storage::assert_not_paused;
+use crate::storage::{assert_not_paused, assert_ts_monotonic};
 use crate::types::{CreditLineData, CreditStatus};
 use soroban_sdk::{symbol_short, Address, Env, Symbol};
 
@@ -43,7 +43,9 @@ pub fn suspend_credit_line(env: Env, borrower: Address) {
     }
 
     credit_line.status = CreditStatus::Suspended;
-    credit_line.suspension_ts = env.ledger().timestamp();
+    let new_ts = env.ledger().timestamp();
+    assert_ts_monotonic(&env, credit_line.suspension_ts, new_ts);
+    credit_line.suspension_ts = new_ts;
     env.storage().persistent().set(&borrower, &credit_line);
 
     publish_credit_line_event(

@@ -50,6 +50,7 @@ pub enum CreditStatus {
 /// | 16   | `BorrowerBlocked`              | Borrower is on the blocked list |
 /// | 17   | `DrawExceedsMaxAmount`         | Draw amount exceeds per-transaction cap |
 /// | 18   | `Paused`                       | Protocol is paused; operation blocked by circuit breaker |
+/// | 19   | `TimestampRegression`          | Ledger timestamp would move a stored timestamp backwards |
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -90,6 +91,8 @@ pub enum ContractError {
     BorrowerBlocked = 17,
     /// Admin acceptance attempted before the delay window has elapsed.
     AdminAcceptTooEarly = 18,
+    /// Ledger timestamp would move a stored timestamp backwards (monotonicity violation).
+    TimestampRegression = 19,
 }
 
 /// Stored credit line data for a borrower.
