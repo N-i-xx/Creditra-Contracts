@@ -125,8 +125,7 @@ impl Credit {
         interest_rate_bps: u32,
         risk_score: u32,
     ) {
-        lifecycle::open_credit_line(env, borrower, credit_limit, interest_rate_bps, risk_score)
-    }
+        require_admin_auth(&env);
 
     /// Draws credit by transferring liquidity tokens to the borrower.
     ///
