@@ -164,11 +164,12 @@ Draw funds from an **Active** credit line. Only the borrower is authorized to ca
 
 - Reverts with `ContractError::Unauthorized` (1) if caller is not the borrower.
 - Reverts with `ContractError::CreditLineNotFound` (3) if no line exists.
-- Reverts with `ContractError::CreditLineSuspended` (18), `ContractError::CreditLineDefaulted` (19), or `ContractError::CreditLineClosed` (4) based on status.
+- Reverts with `ContractError::CreditLineSuspended` (20), `ContractError::CreditLineDefaulted` (21), or `ContractError::CreditLineClosed` (4) based on status.
 - Reverts with `ContractError::InvalidAmount` (5) if `amount <= 0`.
 - Reverts with `ContractError::Overflow` (12) on arithmetic overflow.
-- Reverts with `ContractError::DrawCooldownActive` (20) when a borrower attempts to draw again before the configured cooldown interval has elapsed.
+- Reverts with `ContractError::DrawCooldownActive` (29) when a borrower attempts to draw again before the configured cooldown interval has elapsed.
 - Reverts with `ContractError::OverLimit` (6) if draw exceeds `credit_limit`.
+- Reverts with `ContractError::InsufficientLiquidityReserve` (24) if the configured reserve balance is lower than the requested draw amount.
 - Transfers tokens from liquidity source → borrower.
 
 Emits: `("credit", "drawn")` event.
@@ -554,6 +555,8 @@ The `Credit` contract uses standard `u32` discriminants for standardized error h
 | `25`       | `LiquidityTokenCallFailed`       | Liquidity token call failed where the contract can observe it.                |
 | `26`       | `InsufficientRepaymentAllowance` | Borrower's token allowance is below the effective repayment amount.           |
 | `27`       | `InsufficientRepaymentBalance`   | Borrower's token balance is below the effective repayment amount.             |
+| `28`       | `RepayExceedsMaxAmount`          | The requested repay exceeds the configured per-transaction maximum.           |
+| `29`       | `DrawCooldownActive`             | Borrower attempted to draw again before the cooldown interval elapsed.        |
 
 ---
 

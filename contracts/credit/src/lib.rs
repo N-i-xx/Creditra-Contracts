@@ -26,9 +26,10 @@ mod risk_formula_tests;
 
 use crate::auth::require_admin_auth;
 use crate::events::{
+    publish_credit_line_event,
     publish_admin_rotation_accepted, publish_admin_rotation_proposed,
     publish_drawn_event, publish_interest_accrued_event, publish_repayment_event,
-    AdminRotationAcceptedEvent, AdminRotationProposedEvent, DrawnEvent,
+    AdminRotationAcceptedEvent, AdminRotationProposedEvent, CreditLineEvent, DrawnEvent,
     InterestAccruedEvent, RepaymentEvent,
 };
 use crate::storage::{
@@ -36,7 +37,7 @@ use crate::storage::{
     rate_cfg_key, set_reentrancy_guard, DataKey,
 };
 use crate::types::{ContractError, CreditLineData, CreditStatus, GracePeriodConfig, GraceWaiverMode, ProtocolConfig, RateChangeConfig};
-use soroban_sdk::{contract, contractimpl, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol};
 
 pub const CONTRACT_API_VERSION: (u32, u32, u32) = (1, 0, 0);
 
@@ -125,7 +126,54 @@ impl Credit {
         interest_rate_bps: u32,
         risk_score: u32,
     ) {
+        assert_not_paused(&env);
         require_admin_auth(&env);
+        assert!(credit_limit > 0, "credit_limit must be greater than zero");
+        if interest_rate_bps > crate::risk::MAX_INTEREST_RATE_BPS {
+            env.panic_with_error(ContractError::RateTooHigh);
+        }
+        if risk_score > crate::risk::MAX_RISK_SCORE {
+            env.panic_with_error(ContractError::ScoreTooHigh);
+        }
+
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<Address, CreditLineData>(&borrower)
+        {
+            assert!(
+                existing.status != CreditStatus::Active,
+                "borrower already has an active credit line"
+            );
+        }
+
+        let credit_line = CreditLineData {
+            borrower: borrower.clone(),
+            credit_limit,
+            utilized_amount: 0,
+            interest_rate_bps,
+            risk_score,
+            status: CreditStatus::Active,
+            last_rate_update_ts: 0,
+            accrued_interest: 0,
+            last_accrual_ts: 0,
+            suspension_ts: 0,
+        };
+
+        env.storage().persistent().set(&borrower, &credit_line);
+
+        publish_credit_line_event(
+            &env,
+            (symbol_short!("credit"), symbol_short!("opened")),
+            CreditLineEvent {
+                borrower,
+                status: CreditStatus::Active,
+                credit_limit,
+                interest_rate_bps,
+                risk_score,
+            },
+        );
+    }
 
     /// Draws credit by transferring liquidity tokens to the borrower.
     ///
@@ -1162,7 +1210,7 @@ mod test_coverage {
             CreditStatus::Suspended
         );
         client.default_credit_line(&borrower);
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
         assert_eq!(
             client.get_credit_line(&borrower).unwrap().status,
             CreditStatus::Active
@@ -1373,7 +1421,7 @@ mod test_smoke_coverage {
         client.suspend_credit_line(&borrower);
         client.suspend_credit_line(&borrower); // already suspended
         client.default_credit_line(&borrower);
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
 
         sac.mint(&borrower, &100_i128);
         TokenClient::new(&env, &token_address).approve(
@@ -1585,7 +1633,7 @@ mod test_mock_liquidity_token {
         let env = Env::default();
         let (client, _admin, borrower) = base_setup(&env);
         // Line is Active, not Defaulted
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
     }
 
     #[test]
@@ -1595,7 +1643,7 @@ mod test_mock_liquidity_token {
         let (client, _admin, borrower) = base_setup(&env);
         client.suspend_credit_line(&borrower);
         // Line is Suspended, not Defaulted
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
     }
 
     // ── open_credit_line: allows reopening after Closed status ───────────────
@@ -1633,7 +1681,7 @@ mod test_mock_liquidity_token {
         env.mock_all_auths();
         let (client, _admin, borrower) = base_setup(&env);
         client.default_credit_line(&borrower);
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
         let events = env.events().all();
         let (_contract, topics, data) = events.last().unwrap();
         assert_eq!(
@@ -1662,7 +1710,7 @@ mod test_mock_liquidity_token {
         client.repay_credit(&borrower, &50_i128);
         client.suspend_credit_line(&borrower);
         client.default_credit_line(&borrower);
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
         client.close_credit_line(&borrower, &admin);
 
         let events = env.events().all();

@@ -9,7 +9,7 @@
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Address, Env};
 
-use creditra_credit::{Credit, CreditClient};
+use creditra_credit::{types::CreditStatus, Credit, CreditClient};
 
 fn setup() -> (Env, Address, Address) {
     let env = Env::default();
@@ -124,7 +124,7 @@ fn suspension_ts_cleared_on_reinstate() {
     client.suspend_credit_line(&borrower);
 
     env.ledger().with_mut(|li| li.timestamp = 3_000);
-    client.reinstate_credit_line(&borrower);
+    client.reinstate_credit_line(&borrower, &CreditStatus::Active);
 
     let line = client.get_credit_line(&borrower);
     assert_eq!(line.suspension_ts, 0);
@@ -141,7 +141,7 @@ fn suspension_ts_resuspend_after_reinstate_passes() {
     env.ledger().with_mut(|li| li.timestamp = 2_000);
     client.suspend_credit_line(&borrower);
     env.ledger().with_mut(|li| li.timestamp = 3_000);
-    client.reinstate_credit_line(&borrower);
+    client.reinstate_credit_line(&borrower, &CreditStatus::Active);
 
     // After reinstate, suspension_ts == 0, so any ts passes the guard
     env.ledger().with_mut(|li| li.timestamp = 1_500);

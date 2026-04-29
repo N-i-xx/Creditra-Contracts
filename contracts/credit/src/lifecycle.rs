@@ -396,7 +396,7 @@ pub fn settle_default_liquidation(
 ///
 /// # Events
 /// Emits a `("credit", "reinstate")` [`CreditLineEvent`].
-pub fn reinstate_credit_line(env: Env, borrower: Address) {
+pub fn reinstate_credit_line(env: Env, borrower: Address, target_status: CreditStatus) {
     assert_not_paused(&env);
     require_admin_auth(&env);
 

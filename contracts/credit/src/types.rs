@@ -60,6 +60,7 @@ pub enum CreditStatus {
 /// | 26   | `InsufficientRepaymentAllowance` | Borrower allowance cannot cover repayment |
 /// | 27   | `InsufficientRepaymentBalance` | Borrower balance cannot cover repayment |
 /// | 28   | `RepayExceedsMaxAmount`        | Repay amount exceeds per-transaction cap |
+/// | 29   | `DrawCooldownActive`          | Borrower attempted to draw before cooldown elapsed |
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -120,6 +121,8 @@ pub enum ContractError {
     InsufficientRepaymentBalance = 27,
     /// The requested repay exceeds the configured per-transaction maximum.
     RepayExceedsMaxAmount = 28,
+    /// Borrower attempted to draw again before the cooldown interval elapsed.
+    DrawCooldownActive = 29,
 }
 
 /// Stored credit line data for a borrower.
