@@ -194,3 +194,13 @@ pub fn assert_not_paused(env: &Env) {
 pub fn grace_period_key(env: &Env) -> Symbol {
     Symbol::new(env, "grace_cfg")
 }
+
+/// Assert that a timestamp update is monotonic.
+///
+/// Reverts if `new_ts <= stored_ts` and `stored_ts != 0`.
+/// A `stored_ts` of 0 is treated as "never written" and always passes.
+pub fn assert_ts_monotonic(env: &Env, stored_ts: u64, new_ts: u64) {
+    if stored_ts != 0 && new_ts <= stored_ts {
+        env.panic_with_error(crate::types::ContractError::Paused);
+    }
+}
