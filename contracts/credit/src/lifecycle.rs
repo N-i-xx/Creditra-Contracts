@@ -16,7 +16,7 @@ use crate::events::{
     publish_default_liquidation_settled_event, CreditLineEvent, DefaultLiquidationSettledEvent,
 };
 use crate::risk::{MAX_INTEREST_RATE_BPS, MAX_RISK_SCORE};
-use crate::storage::assert_not_paused;
+use crate::storage::{assert_not_paused, assert_ts_monotonic};
 use crate::types::{ContractError, CreditLineData, CreditStatus};
 use soroban_sdk::{symbol_short, Address, Env, Symbol};
 
@@ -42,7 +42,7 @@ fn suspend_credit_line_internal(env: &Env, borrower: Address) {
         .storage()
         .persistent()
         .get(&borrower)
-        .expect("Credit line not found");
+        .unwrap_or_else(|| env.panic_with_error(ContractError::CreditLineNotFound));
 
     // Apply interest accrual before any mutation.
     credit_line = crate::accrual::apply_accrual(env, credit_line);
@@ -53,7 +53,7 @@ fn suspend_credit_line_internal(env: &Env, borrower: Address) {
 
     credit_line.status = CreditStatus::Suspended;
     let new_ts = env.ledger().timestamp();
-    assert_ts_monotonic(&env, credit_line.suspension_ts, new_ts);
+    assert_ts_monotonic(env, credit_line.suspension_ts, new_ts);
     credit_line.suspension_ts = new_ts;
     env.storage().persistent().set(&borrower, &credit_line);
 
